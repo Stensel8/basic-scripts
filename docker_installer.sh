@@ -160,7 +160,7 @@ do_install() {
             echo_docker_as_nonroot
             ;;
 
-        centos|fedora|rhel|amzn)
+        centos|fedora|rhel)
             print_info "YUM-based system detected: $distro"
             if command_exists dnf; then
                 pkg_manager="dnf"
@@ -173,9 +173,27 @@ do_install() {
             print_info "Installing yum-utils and adding Docker repository..."
             $pkg_manager install $pkg_manager_flags yum-utils || print_error "Failed to install yum-utils."
             rm -f /etc/yum.repos.d/docker-ce.repo /etc/yum.repos.d/docker-ce-staging.repo
-            # Gebruik de CentOS repo als work-around voor Amazon Linux
-            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || print_error "Failed to add Docker repository."
+            $pkg_manager config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || print_error "Failed to add Docker repository."
 
+            print_info "Installing Docker packages..."
+            $pkg_manager install $pkg_manager_flags docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || print_error "Failed to install Docker."
+            ;;
+
+        amzn)
+            # Voor Amazon Linux 2023 proberen we de Fedora repo, aangezien deze distro qua dnf-beheer dichterbij lijkt.
+            print_info "Amazon Linux detected. Using Fedora repository as a work-around."
+            if command_exists dnf; then
+                pkg_manager="dnf"
+                pkg_manager_flags="-y -q --best"
+            else
+                pkg_manager="yum"
+                pkg_manager_flags="-y -q"
+            fi
+
+            print_info "Installing dnf-plugins-core..."
+            $pkg_manager install $pkg_manager_flags dnf-plugins-core || print_error "Failed to install dnf-plugins-core."
+            print_info "Adding Docker repository from Fedora..."
+            $pkg_manager config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo || print_error "Failed to add Docker repository."
             print_info "Installing Docker packages..."
             $pkg_manager install $pkg_manager_flags docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || print_error "Failed to install Docker."
             ;;
@@ -212,9 +230,9 @@ do_install() {
 if [ -x "$(command -v apt-get)" ]; then
     PM="apt-get"
     print_info "APT-based system detected."
-elif [ -x "$(command -v yum)" ]; then
+elif [ -x "$(command -v yum)" ] || [ -x "$(command -v dnf)" ]; then
     PM="yum"
-    print_info "YUM-based system detected."
+    print_info "YUM-based (or DNF-based) system detected."
 else
     print_error "Unsupported package manager. Exiting."
 fi
