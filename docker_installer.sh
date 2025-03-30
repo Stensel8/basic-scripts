@@ -180,8 +180,8 @@ do_install() {
             ;;
 
         amzn)
-            # Voor Amazon Linux 2023 proberen we de Fedora repo, aangezien deze distro qua dnf-beheer dichterbij lijkt.
-            print_info "Amazon Linux detected. Using Fedora repository as a work-around."
+            # Voor Amazon Linux 2023 volgens AWS re:Post werken de CentOS-instructies met een kleine aanpassing.
+            print_info "Amazon Linux detected. Using CentOS repository with release override."
             if command_exists dnf; then
                 pkg_manager="dnf"
                 pkg_manager_flags="-y -q --best"
@@ -192,10 +192,15 @@ do_install() {
 
             print_info "Installing dnf-plugins-core..."
             $pkg_manager install $pkg_manager_flags dnf-plugins-core || print_error "Failed to install dnf-plugins-core."
-            print_info "Adding Docker repository from Fedora..."
-            $pkg_manager config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo || print_error "Failed to add Docker repository."
+
+            print_info "Adding Docker repository from CentOS..."
+            $pkg_manager config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || print_error "Failed to add Docker repository."
+
+            print_info "Overriding \$releasever in the repo file to '9'..."
+            sed -i 's/\$releasever/9/g' /etc/yum.repos.d/docker-ce.repo
+
             print_info "Installing Docker packages..."
-            $pkg_manager install $pkg_manager_flags docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || print_error "Failed to install Docker."
+            $pkg_manager install $pkg_manager_flags docker-ce-27.3.1 docker-ce-cli-27.3.1 containerd.io docker-buildx-plugin docker-compose-plugin || print_error "Failed to install Docker."
             ;;
 
         sles)
