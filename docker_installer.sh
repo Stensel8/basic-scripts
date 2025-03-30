@@ -2,7 +2,7 @@
 set -e
 
 ###############################################
-# Custom made Docker Installer Script
+# Docker Installer Script
 ###############################################
 
 # Colors for messages
