@@ -160,7 +160,7 @@ do_install() {
             echo_docker_as_nonroot
             ;;
 
-        centos|fedora|rhel)
+        centos|fedora|rhel|amzn)
             print_info "YUM-based system detected: $distro"
             if command_exists dnf; then
                 pkg_manager="dnf"
@@ -173,6 +173,7 @@ do_install() {
             print_info "Installing yum-utils and adding Docker repository..."
             $pkg_manager install $pkg_manager_flags yum-utils || print_error "Failed to install yum-utils."
             rm -f /etc/yum.repos.d/docker-ce.repo /etc/yum.repos.d/docker-ce-staging.repo
+            # Gebruik de CentOS repo als work-around voor Amazon Linux
             yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || print_error "Failed to add Docker repository."
 
             print_info "Installing Docker packages..."
