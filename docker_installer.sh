@@ -2,7 +2,7 @@
 set -e
 
 ###############################################
-# Docker Installer Script (Revised)
+# docker_installer.sh
 ###############################################
 
 # Define color codes for output messages
@@ -223,6 +223,7 @@ do_install() {
             fi
             print_info "Adding Docker repository for SLES..."
             # Insert SLES-specific installation commands here.
+            #//TODO:
             ;;
         *)
             # Special case for macOS (Darwin)
