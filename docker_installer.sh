@@ -2,41 +2,44 @@
 set -e
 
 ###############################################
-# Docker Installer Script
+# Docker Installer Script (Revised)
 ###############################################
 
-# Colors for messages
+# Define color codes for output messages
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'  # No Color
 
-# Functions for colored messages
-function print_info {
+# Function to print informational messages
+print_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
 }
 
-function print_success {
+# Function to print success messages
+print_success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
 }
 
-function print_warning {
+# Function to print warning messages
+print_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
-function print_error {
+# Function to print error messages and exit
+print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
     exit 1
 }
 
-# Ensure the script is run as root or with sudo
+# Ensure the script is run as root or with sudo privileges
 if [ "$EUID" -ne 0 ]; then
     print_error "This script must be run as root or with sudo privileges. Exiting."
 fi
 
 ###############################################
-# Functions from get.docker.com installer script
+# Utility Functions
 ###############################################
 
 # Check if a command exists
@@ -65,49 +68,52 @@ version_compare() {
     return 0
 }
 
-# Check if $VERSION is greater or equal to a given version
-version_gte() {
-    if [ -z "$VERSION" ]; then
-        return 0
-    fi
-    version_compare "$VERSION" "$1"
-}
-
-# Get Linux distribution ID (using /etc/os-release)
-get_distribution() {
-    local lsb_dist=""
-    if [ -r /etc/os-release ]; then
-        . /etc/os-release
-        lsb_dist="$ID"
-    fi
-    echo "$lsb_dist"
-}
-
 # Show a deprecation warning for unsupported or EOL distributions
 deprecation_notice() {
     local distro="$1"
-    local distro_version="$2"
-    print_warning "This Linux distribution ($distro $distro_version) is deprecated and no longer supported."
+    local version="$2"
+    print_warning "This Linux distribution ($distro $version) is deprecated and no longer supported."
     print_info "Consider upgrading to a newer version of $distro."
     sleep 5
 }
 
-# Provide instructions to run Docker as non-root (rootless mode)
-echo_docker_as_nonroot() {
+# Print instructions to run Docker as a non-root user (rootless mode)
+print_docker_rootless_info() {
     print_info "To run Docker as a non-root user, consider installing rootless mode:"
     echo "    dockerd-rootless-setuptool.sh install"
     print_info "See https://docs.docker.com/go/rootless/ for more information."
 }
 
-# Check if this is a forked distro (e.g., Linux Mint)
-check_forked() {
+# Check if the distribution is forked (e.g., Linux Mint)
+check_forked_distro() {
     if command_exists lsb_release; then
         set +e
         lsb_release -a -u > /dev/null 2>&1
         if [ "$?" = "0" ]; then
-            print_info "Forked distro detected. Using upstream release information."
+            print_info "Forked distribution detected. Using upstream release information."
         fi
         set -e
+    fi
+}
+
+# Detect distribution using /etc/os-release. Also check ID_LIKE for broader compatibility.
+get_distribution() {
+    if [ -r /etc/os-release ]; then
+        . /etc/os-release
+        # Use ID if available; fallback to ID_LIKE if necessary
+        echo "${ID,,}"
+    else
+        echo "unknown"
+    fi
+}
+
+# Get additional distro info (e.g., ID_LIKE) for finer classification
+get_distro_like() {
+    if [ -r /etc/os-release ]; then
+        . /etc/os-release
+        echo "${ID_LIKE,,}"
+    else
+        echo ""
     fi
 }
 
@@ -115,33 +121,35 @@ check_forked() {
 # Main Installation Function
 ###############################################
 do_install() {
-    print_info "Starting Docker installation (integrated with get.docker.com functions)."
+    print_info "Starting Docker installation..."
 
     # Check if Docker is already installed
     if command_exists docker; then
-        print_warning "Docker appears to be already installed. Skipping installation."
+        print_warning "Docker is already installed. Skipping installation."
         exit 0
     fi
 
-    # Detect distribution and version
-    distro=$(get_distribution | tr '[:upper:]' '[:lower:]')
-    check_forked
+    # Detect distribution and additional info
+    distro=$(get_distribution)
+    distro_like=$(get_distro_like)
+    check_forked_distro
 
     case "$distro" in
         ubuntu|debian|raspbian)
             print_info "APT-based system detected: $distro"
+            # Get distribution codename (using lsb_release or /etc/os-release)
             if command_exists lsb_release; then
-                dist_version=$(lsb_release --codename | cut -f2)
+                codename=$(lsb_release -cs)
             else
-                dist_version=$(grep VERSION_CODENAME /etc/os-release | cut -d'=' -f2)
+                codename=$(grep VERSION_CODENAME /etc/os-release | cut -d'=' -f2)
             fi
 
-            # Warning for older versions
-            case "$distro.$dist_version" in
-                ubuntu.trusty|ubuntu.xenial|debian.jessie)
-                    deprecation_notice "$distro" "$dist_version"
-                    ;;
-            esac
+            # Warn on deprecated older releases if needed
+            if [ "$distro" == "ubuntu" ] && { [ "$codename" = "trusty" ] || [ "$codename" = "xenial" ]; }; then
+                deprecation_notice "$distro" "$codename"
+            elif [ "$distro" == "debian" ] && [ "$codename" = "jessie" ]; then
+                deprecation_notice "$distro" "$codename"
+            fi
 
             print_info "Updating package list and installing prerequisites..."
             apt-get update -y || print_error "Failed to update package list."
@@ -150,73 +158,76 @@ do_install() {
             print_info "Adding Docker GPG key and repository..."
             mkdir -p /etc/apt/keyrings
             curl -fsSL "https://download.docker.com/linux/$distro/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg || print_error "Failed to download Docker GPG key."
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$distro $dist_version stable" > /etc/apt/sources.list.d/docker.list
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$distro $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
 
             print_info "Updating package list..."
             apt-get update -y
 
             print_info "Installing Docker packages..."
             apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || print_error "Failed to install Docker."
-            echo_docker_as_nonroot
+            print_docker_rootless_info
             ;;
-
         centos|fedora|rhel)
-            print_info "YUM-based system detected: $distro"
+            print_info "YUM/DNF-based system detected: $distro"
             if command_exists dnf; then
                 pkg_manager="dnf"
-                pkg_manager_flags="-y -q --best"
+                pkg_flags="-y -q --best"
             else
                 pkg_manager="yum"
-                pkg_manager_flags="-y -q"
+                pkg_flags="-y -q"
             fi
 
             print_info "Installing yum-utils and adding Docker repository..."
-            $pkg_manager install $pkg_manager_flags yum-utils || print_error "Failed to install yum-utils."
+            $pkg_manager install $pkg_flags yum-utils || print_error "Failed to install yum-utils."
             rm -f /etc/yum.repos.d/docker-ce.repo /etc/yum.repos.d/docker-ce-staging.repo
             $pkg_manager config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || print_error "Failed to add Docker repository."
 
             print_info "Installing Docker packages..."
-            $pkg_manager install $pkg_manager_flags docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || print_error "Failed to install Docker."
+            $pkg_manager install $pkg_flags docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || print_error "Failed to install Docker."
             ;;
-
         amzn)
-            # Voor Amazon Linux 2023 volgens AWS re:Post werken de CentOS-instructies met een kleine aanpassing.
-            print_info "Amazon Linux detected. Using CentOS repository with release override."
+            print_info "Amazon Linux detected."
+            # Distinguish between Amazon Linux 2 and Amazon Linux 2023 based on /etc/os-release content
+            if grep -qi "2023" /etc/os-release; then
+                print_info "Amazon Linux 2023 detected. Using CentOS repository override."
+                override_release="9"
+            else
+                print_info "Assuming Amazon Linux 2. Using standard installation."
+                override_release="8"
+            fi
+
             if command_exists dnf; then
                 pkg_manager="dnf"
-                pkg_manager_flags="-y -q --best"
+                pkg_flags="-y -q --best"
             else
                 pkg_manager="yum"
-                pkg_manager_flags="-y -q"
+                pkg_flags="-y -q"
             fi
 
             print_info "Installing dnf-plugins-core..."
-            $pkg_manager install $pkg_manager_flags dnf-plugins-core || print_error "Failed to install dnf-plugins-core."
+            $pkg_manager install $pkg_flags dnf-plugins-core || print_error "Failed to install dnf-plugins-core."
 
             print_info "Adding Docker repository from CentOS..."
             $pkg_manager config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || print_error "Failed to add Docker repository."
 
-            print_info "Overriding \$releasever in the repo file to '9'..."
-            sed -i 's/\$releasever/9/g' /etc/yum.repos.d/docker-ce.repo
+            print_info "Overriding \$releasever in the repo file to '$override_release'..."
+            sed -i "s/\\\$releasever/$override_release/g" /etc/yum.repos.d/docker-ce.repo
 
             print_info "Installing Docker packages..."
-            $pkg_manager install $pkg_manager_flags docker-ce-27.3.1 docker-ce-cli-27.3.1 containerd.io docker-buildx-plugin docker-compose-plugin || print_error "Failed to install Docker."
+            $pkg_manager install $pkg_flags docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || print_error "Failed to install Docker."
             ;;
-
         sles)
             print_info "SLES system detected."
             if [ "$(uname -m)" != "s390x" ]; then
-                print_error "Packages for SLES are currently only available for s390x."
+                print_error "SLES packages are currently only available for s390x architecture."
             fi
             print_info "Adding Docker repository for SLES..."
-            # SLES-specific installation commands should be added here.
+            # Insert SLES-specific installation commands here.
             ;;
-
         *)
-            if [ -z "$distro" ]; then
-                if [[ "$(uname -s)" == *"Darwin"* ]]; then
-                    print_error "Unsupported operating system 'macOS'. Please install Docker Desktop from https://www.docker.com/products/docker-desktop"
-                fi
+            # Special case for macOS (Darwin)
+            if [[ "$(uname -s)" == *"Darwin"* ]]; then
+                print_error "Unsupported operating system 'macOS'. Please install Docker Desktop from https://www.docker.com/products/docker-desktop"
             fi
             print_error "Unsupported distribution: $distro"
             ;;
@@ -230,16 +241,14 @@ do_install() {
 }
 
 ###############################################
-# Detect Package Manager (APT or YUM) and Run Installer
+# Verify Package Manager Existence and Start Installation
 ###############################################
-if [ -x "$(command -v apt-get)" ]; then
-    PM="apt-get"
-    print_info "APT-based system detected."
-elif [ -x "$(command -v yum)" ] || [ -x "$(command -v dnf)" ]; then
-    PM="yum"
-    print_info "YUM-based (or DNF-based) system detected."
+if command_exists apt-get; then
+    print_info "APT-based package manager detected."
+elif command_exists yum || command_exists dnf; then
+    print_info "YUM/DNF-based package manager detected."
 else
-    print_error "Unsupported package manager. Exiting."
+    print_error "No supported package manager found. Exiting."
 fi
 
 do_install
