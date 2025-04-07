@@ -1,300 +1,247 @@
 #!/bin/bash
-set -e # Exit on error
-set -o pipefail # Exit on pipe failures
+#
+# Ansible Installer - Version 3.0
+#
+# Installs Ansible in a virtual environment with enhanced error handling,
+# logging, Python version management, and more.
 
-# === Default Settings ===
-# Allow overriding via environment variables or command-line flags
-REQ_PYTHON_VERSION="${REQ_PYTHON_VERSION:-3.12}" # Prefer 3.12 first
-BUILD_PYTHON_VERSION="${BUILD_PYTHON_VERSION:-3.13.2}" # Fallback build version
-# TODO: Fetch SHA256 dynamically or update this when BUILD_PYTHON_VERSION changes
-BUILD_PYTHON_SHA256="${BUILD_PYTHON_SHA256:-<SHA256_checksum_for_3.13.2>}"
-VENV_DIR="${VENV_DIR:-/opt/ansible-env}"
-LOG_FILE="/tmp/ansible_install_$(date +%Y%m%d_%H%M%S).log"
-CLEANUP_SOURCE=false
-FORCE_BUILD=false
-SKIP_BUILD=false
-# TODO: Add getopt for command-line parsing (--python-version, --venv-dir, --cleanup, --force-build, etc.)
+set -e
+set -o pipefail
 
-# === Styling ===
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BLUE='\033[0;34m'; NC='\033[0m'
-info()    { echo -e "${BLUE}[INFO]${NC} $1" | tee -a "$LOG_FILE"; }
-success() { echo -e "${GREEN}[SUCCESS]${NC} $1" | tee -a "$LOG_FILE"; }
-warn()    { echo -e "${YELLOW}[WARN]${NC} $1" | tee -a "$LOG_FILE"; }
-error()   { echo -e "${RED}[ERROR]${NC} $1" | tee -a "$LOG_FILE"; exit 1; }
-log_cmd() {
-    info "Executing: $@"
-    # Run command, redirect stdout/stderr to log file AND show on console via tee
-    if "$@" >> "$LOG_FILE" 2>&1 | tee -a "$LOG_FILE"; then
-        return 0
-    else
-        error "Command failed: '$*'. Check log: $LOG_FILE"
-        # No exit 1 here, error() already does that
-    fi
-}
-log_cmd_no_tee() {
-    info "Executing (output to log only): $@"
-    if "$@" >> "$LOG_FILE" 2>&1; then
-        return 0
-    else
-        error "Command failed: '$*'. Check log: $LOG_FILE"
-    fi
+# --- Configuration ---
+LOG_FILE="/tmp/ansible_installer.log"
+REQUESTED_PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
+FALLBACK_PYTHON_VERSION="3.13.2"
+ANSIBLE_VENV_DIR="./ansible_venv"
+ANSIBLE_TOOLS=("ansible" "ansible-playbook" "ansible-vault" "ansible-galaxy")
+CONFIG_FILE="/etc/ansible/ansible.cfg"
+CLEANUP="${CLEANUP:-false}"
+
+# --- Logging Functions ---
+info() {
+  local msg="$1"
+  echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $msg"
+  echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $msg" >> "$LOG_FILE"
 }
 
+success() {
+  local msg="$1"
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $msg"
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" >> "$LOG_FILE"
+}
 
-# === Variables ===
-# Derived variables
-PY_BUILD_TARBALL="Python-$BUILD_PYTHON_VERSION.tgz"
-PY_BUILD_URL="https://www.python.org/ftp/python/$BUILD_PYTHON_VERSION/$PY_BUILD_TARBALL"
-PY_BUILD_SRC_DIR="/usr/src/Python-$BUILD_PYTHON_VERSION"
-PY_CMD="" # Will be determined
+warn() {
+  local msg="$1"
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" >&2
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" >> "$LOG_FILE"
+}
 
-# === Check root ===
-[ "$EUID" -ne 0 ] && error "This script must be run as root (sudo)."
+error() {
+  local msg="$1"
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" >&2
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" >> "$LOG_FILE"
+}
 
-# === Log Start ===
-info "Starting Ansible installation script..."
-info "Log file: $LOG_FILE"
-info "Requested Python: $REQ_PYTHON_VERSION (will build $BUILD_PYTHON_VERSION if needed)"
-info "Ansible Virtual Env Dir: $VENV_DIR"
+# --- Helper Functions ---
+check_command() {
+  if! command -v "$1" &> /dev/null; then
+    error "Command '$1' not found. Please ensure it is installed."
+    exit 1
+  fi
+}
 
-# === Detect distro ===
-if [ -f /etc/os-release ]; then . /etc/os-release; DISTRO_ID=${ID,,}; else DISTRO_ID="unknown"; fi
-info "Detected distribution: $DISTRO_ID"
+install_dependencies() {
+  info "Installing build dependencies..."
+  if command -v apt-get &> /dev/null; then
+    sudo apt-get update
+    sudo apt-get install -y --no-install-recommends build-essential python3-dev libffi-dev libssl-dev zlib1g-dev
+  elif command -v dnf &> /dev/null |
+| command -v yum &> /dev/null; then
+    sudo "${0##*/}" -y groupinstall "Development Tools"
+    sudo "${0##*/}" install -y python3-devel libffi-devel openssl-devel zlib-devel
+  else
+    error "Unsupported package manager. Please install build dependencies manually."
+    exit 1
+  fi
+  success "Build dependencies installed."
+}
 
-# === Package Manager Detection ===
-PKG_MANAGER=""
-if command -v apt &> /dev/null; then PKG_MANAGER="apt"; PKG_INSTALL="apt install -y"; PKG_UPDATE="apt update -y"; PKG_UPGRADE="apt upgrade -y";
-elif command -v dnf &> /dev/null; then PKG_MANAGER="dnf"; PKG_INSTALL="dnf install -y"; PKG_UPDATE="dnf check-update"; PKG_UPGRADE="dnf upgrade -y";
-elif command -v yum &> /dev/null; then PKG_MANAGER="yum"; PKG_INSTALL="yum install -y"; PKG_UPDATE="yum check-update"; PKG_UPGRADE="yum update -y";
-else error "Unsupported package manager."; fi
-info "Using package manager: $PKG_MANAGER"
+install_python() {
+  info "Attempting to install Python version $REQUESTED_PYTHON_VERSION..."
+  if command -v apt-get &> /dev/null; then
+    sudo apt-get update
+    sudo apt-get install -y python3."${REQUESTED_PYTHON_VERSION%.*}"
+    if python3."${REQUESTED_PYTHON_VERSION%.*}" --version 2>/dev/null | grep -q "${REQUESTED_PYTHON_VERSION%.*}"; then
+      success "Successfully installed Python $REQUESTED_PYTHON_VERSION using apt."
+      return 0
+    fi
+  elif command -v dnf &> /dev/null |
+| command -v yum &> /dev/null; then
+    sudo "${0##*/}" install -y python3"${REQUESTED_PYTHON_VERSION//./}"
+    if python3"${REQUESTED_PYTHON_VERSION//./}" --version 2>/dev/null | grep -q "$REQUESTED_PYTHON_VERSION"; then
+      success "Successfully installed Python $REQUESTED_PYTHON_VERSION using yum/dnf."
+      return 0
+    fi
+  fi
 
-# === Update system (Optional? Could be risky) ===
-warn "Updating system packages (output in log)..."
-case $PKG_MANAGER in
-    apt) log_cmd_no_tee env DEBIAN_FRONTEND=noninteractive $PKG_UPDATE; log_cmd_no_tee env DEBIAN_FRONTEND=noninteractive $PKG_UPGRADE ;;
-    dnf|yum) log_cmd_no_tee $PKG_UPGRADE ;;
-esac
+  warn "Python version $REQUESTED_PYTHON_VERSION not found via package manager. Attempting to build from source (fallback: $FALLBACK_PYTHON_VERSION)."
+  build_python_from_source "$FALLBACK_PYTHON_VERSION"
+}
 
-# === Install Dependencies ===
-info "Installing base dependencies (output in log)..."
-# Define dependencies per package manager
-declare -A deps
-deps["apt"]="build-essential libssl-dev zlib1g-dev libncurses5-dev libffi-dev libsqlite3-dev libbz2-dev libreadline-dev liblzma-dev tk-dev make git wget curl libmpdec-dev python3-pip python3-venv software-properties-common"
-deps["dnf"]="gcc openssl-devel bzip2-devel libffi-devel zlib-devel ncurses-devel sqlite-devel xz-devel readline-devel tk-devel make git wget curl mpdecimal-devel python3-pip python3-virtualenv"
-deps["yum"]="gcc openssl-devel bzip2-devel libffi-devel zlib-devel ncurses-devel sqlite-devel xz-devel readline-devel tk-devel make git wget curl mpdecimal-devel python3-pip python3-virtualenv" # Adjust for older yum if needed
+build_python_from_source() {
+  local version="$1"
+  local filename="Python-$version.tgz"
+  local url="https://www.python.org/ftp/python/$version/$filename"
+  local expected_sha256=""
 
-log_cmd_no_tee $PKG_INSTALL ${deps[$PKG_MANAGER]}
+  case "$version" in
+    "3.13.2") expected_sha256="your_sha256_here_for_3.13.2" ;; # Replace with actual SHA256
+    *) error "SHA256 checksum for Python $version not defined. Exiting."; exit 1 ;;
+  esac
 
-# === Find Suitable Python ===
-info "Looking for suitable Python ($REQ_PYTHON_VERSION)..."
+  info "Downloading Python $version source from $url..."
+  wget "$url" |
+| { error "Failed to download Python source."; exit 1; }
 
-# Check if requested version command exists
-if command -v "python${REQ_PYTHON_VERSION}" &>/dev/null; then
-    PY_CMD="python${REQ_PYTHON_VERSION}"
-    info "Found existing system Python: $PY_CMD"
-# Try PPA for Debian/Ubuntu if not found and not forcing build
-elif [ "$PKG_MANAGER" == "apt" ] && [ "$FORCE_BUILD" = false ]; then
-    info "Trying to install Python $REQ_PYTHON_VERSION via deadsnakes PPA..."
-    # Check if add-apt-repository exists
-    if command -v add-apt-repository &>/dev/null; then
-        if ! command -v "python${REQ_PYTHON_VERSION}" &>/dev/null; then
-            log_cmd_no_tee add-apt-repository -y ppa:deadsnakes/ppa || warn "Could not add deadsnakes PPA. Proceeding without it."
-            log_cmd_no_tee apt update -y
-            # Try installing, but don't fail script if it doesn't work
-            log_cmd_no_tee apt install -y "python${REQ_PYTHON_VERSION}" "python${REQ_PYTHON_VERSION}-venv" || warn "Failed to install python${REQ_PYTHON_VERSION} from PPA."
-        fi
-        # Re-check if it's available now
-        if command -v "python${REQ_PYTHON_VERSION}" &>/dev/null; then
-            PY_CMD="python${REQ_PYTHON_VERSION}"
-            info "Successfully installed Python from PPA: $PY_CMD"
-        else
-             info "Python $REQ_PYTHON_VERSION not found via system or PPA."
-        fi
+  echo "$expected_sha256  $filename" | sha256sum -c --strict |
+| { error "SHA256 checksum verification failed."; rm -f "$filename"; exit 1; }
+
+  info "Extracting Python source..."
+  tar -xf "$filename" |
+| { error "Failed to extract Python source."; rm -f "$filename"; exit 1; }
+  cd "Python-$version" |
+| { error "Failed to change directory."; exit 1; }
+
+  info "Configuring and building Python $version..."
+ ./configure --enable-optimizations --enable-shared --with-ensurepip=install |
+| { error "Failed to configure Python."; make clean; cd..; rm -rf "Python-$version" "$filename"; exit 1; }
+  make -j "$(nproc)" |
+| { error "Failed to build Python."; make clean; cd..; rm -rf "Python-$version" "$filename"; exit 1; }
+
+  info "Installing Python $version using altinstall..."
+  sudo make altinstall |
+| { error "Failed to install Python using altinstall."; make clean; cd..; rm -rf "Python-$version" "$filename"; exit 1; }
+
+  cd..
+  rm -rf "Python-$version" "$filename"
+  success "Successfully built and installed Python $version using altinstall."
+}
+
+setup_virtual_environment() {
+  info "Setting up virtual environment in $ANSIBLE_VENV_DIR..."
+  if; then
+    info "Virtual environment already exists. Checking Python version..."
+    local venv_python_version=$("$ANSIBLE_VENV_DIR/bin/python3" --version 2>/dev/null | awk '{print $2}')
+    if]; then
+      warn "Existing virtual environment's Python version ($venv_python_version) does not match the intended version ($REQUESTED_PYTHON_VERSION or $FALLBACK_PYTHON_VERSION). Consider removing '$ANSIBLE_VENV_DIR' if you want a new environment."
     else
-        warn "Command 'add-apt-repository' not found. Cannot use PPA."
+      info "Existing virtual environment's Python version is acceptable."
+      return 0
     fi
-fi
+  fi
+  python3 -m venv "$ANSIBLE_VENV_DIR" |
+| { error "Failed to create virtual environment."; exit 1; }
+  success "Virtual environment created."
+}
 
-# === Build Python from source if no suitable Python found ===
-if [ -z "$PY_CMD" ] && [ "$SKIP_BUILD" = false ]; then
-    info "No suitable Python found or PPA failed. Attempting to build Python $BUILD_PYTHON_VERSION from source."
-    TARGET_PY_BIN="/usr/local/bin/python${BUILD_PYTHON_VERSION%.*}" # e.g., /usr/local/bin/python3.13
+install_ansible() {
+  info "Installing Ansible in the virtual environment..."
+  source "$ANSIBLE_VENV_DIR/bin/activate" |
+| { error "Failed to activate virtual environment."; exit 1; }
+  pip install --upgrade pip setuptools wheel |
+| { error "Failed to upgrade pip, setuptools, or wheel."; deactivate; exit 1; }
+  pip install ansible |
+| { error "Failed to install Ansible."; deactivate; exit 1; }
+  deactivate
+  success "Ansible installed in the virtual environment."
+}
 
-    if [ -x "$TARGET_PY_BIN" ] && [ "$FORCE_BUILD" = false ]; then
-        info "Python $BUILD_PYTHON_VERSION already built and installed ($TARGET_PY_BIN). Skipping build."
-        PY_CMD="$TARGET_PY_BIN"
+create_symlinks() {
+  info "Creating symbolic links for Ansible tools in /usr/local/bin..."
+  for tool in "${ANSIBLE_TOOLS[@]}"; do
+    if; then
+      sudo ln -sf "$ANSIBLE_VENV_DIR/bin/$tool" "/usr/local/bin/$tool" |
+| warn "Failed to create symlink for $tool. Ensure you have necessary permissions."
     else
-        # Check disk space in /usr/src (e.g., need ~1GB?)
-        # check_disk_space /usr/src 1000 # Implement this function
-
-        cd /usr/src
-        # Verify checksum (SHA256)
-        if [ ! -f "$PY_BUILD_TARBALL" ] || ! echo "$BUILD_PYTHON_SHA256  $PY_BUILD_TARBALL" | sha256sum --check --status; then
-            warn "Downloading fresh Python $BUILD_PYTHON_VERSION tarball..."
-            rm -f "$PY_BUILD_TARBALL"
-            log_cmd wget -q "$PY_BUILD_URL" # Use log_cmd for better feedback
-             # Verify again after download
-            if ! echo "$BUILD_PYTHON_SHA256  $PY_BUILD_TARBALL" | sha256sum --check --status; then
-                 error "SHA256 checksum mismatch for downloaded $PY_BUILD_TARBALL! Aborting."
-            fi
-             info "SHA256 checksum verified for $PY_BUILD_TARBALL."
-        else
-            info "Python tarball $PY_BUILD_TARBALL already exists and checksum is valid."
-        fi
-
-        if [ -d "$PY_BUILD_SRC_DIR" ]; then
-             info "Removing existing source directory: $PY_BUILD_SRC_DIR"
-             rm -rf "$PY_BUILD_SRC_DIR"
-        fi
-        info "Extracting Python source..."
-        log_cmd tar -xzf "$PY_BUILD_TARBALL"
-
-        cd "$PY_BUILD_SRC_DIR"
-        info "Configuring Python build (Output to log)..."
-        # Log configure output for debugging, don't tee
-        log_cmd_no_tee ./configure --enable-optimizations --with-system-libmpdec --prefix=/usr/local
-
-        info "Building Python $BUILD_PYTHON_VERSION (this can take several minutes)..."
-        # Log make output, maybe tee for progress? Requires careful handling of large output.
-        # Consider logging make to file, but printing dots or progress bar to console.
-        log_cmd_no_tee make -j"$(nproc)" # Using log_cmd_no_tee to avoid flooding console, check log on failure
-
-        info "Installing Python (altinstall)..."
-        log_cmd_no_tee make altinstall # altinstall is crucial
-
-        # Verify installation
-        if [ -x "$TARGET_PY_BIN" ]; then
-            info "Python $BUILD_PYTHON_VERSION successfully built and installed."
-            PY_CMD="$TARGET_PY_BIN"
-        else
-            error "Python build/installation failed. Check log: $LOG_FILE"
-        fi
+      warn "Ansible tool '$tool' not found in the virtual environment."
     fi
-# Handle case where no Python found and building was skipped or failed
-elif [ -z "$PY_CMD" ]; then
-     error "Could not find or install a suitable Python version ($REQ_PYTHON_VERSION or $BUILD_PYTHON_VERSION). Aborting."
-fi
+  done
+  success "Symbolic links created."
+}
 
-# === Final Python Check ===
-if [ -z "$PY_CMD" ] || ! command -v $PY_CMD &>/dev/null; then
-    error "Failed to determine a working Python command (PY_CMD='$PY_CMD'). Aborting."
-fi
-info "Using Python command: $PY_CMD"
-$PY_CMD --version >> "$LOG_FILE" 2>&1 # Log version
+configure_ansible_cfg() {
+  info "Configuring ansible.cfg..."
+  local collections_path="$ANSIBLE_VENV_DIR/lib/python*/site-packages/ansible/collections"
+  collections_path=$(eval echo "$collections_path") # Resolve wildcard
 
-# === Virtualenv Setup ===
-if [ -d "$VENV_DIR" ]; then
-    info "Ansible virtual environment '$VENV_DIR' already exists. Skipping creation."
-    # Optional: Add check if venv python matches $PY_CMD and recreate/warn if not?
-else
-    info "Creating Ansible virtual environment in '$VENV_DIR'..."
-    # Ensure the parent directory exists if VENV_DIR is nested (e.g., /some/path/ansible-env)
-    mkdir -p "$(dirname "$VENV_DIR")"
-    log_cmd "$PY_CMD" -m venv "$VENV_DIR"
-fi
+  if [! -f "$CONFIG_FILE" ]; then
+    info "Creating default ansible.cfg at $CONFIG_FILE..."
+    sudo mkdir -p "$(dirname "$CONFIG_FILE")"
+    sudo touch "$CONFIG_FILE"
+  fi
 
-# === Activate Venv (within subshell for safety) ===
-info "Installing/Updating Ansible in virtual environment..."
-(
-    # Source activation script directly
-    source "$VENV_DIR/bin/activate"
+  sudo sed -i "/^collections_paths/d" "$CONFIG_FILE"
+  sudo echo "collections_paths = $collections_path" >> "$CONFIG_FILE"
+  success "ansible.cfg configured with collections_path: $collections_path"
+}
 
-    # Verify pip is working inside venv
-    if ! command -v pip &>/dev/null; then
-        error "pip command not found within the virtual environment '$VENV_DIR'. Activation might have failed."
-    fi
-    pip --version >> "$LOG_FILE" 2>&1
+cleanup() {
+  if [ "$CLEANUP" = "true" ]; then
+    info "Performing cleanup..."
+    # Cleanup of Python source files is handled within the build_python_from_source function
+    success "Cleanup complete."
+  else
+    info "Skipping cleanup (set CLEANUP=true to enable)."
+  fi
+}
 
-    # Upgrade pip, setuptools, wheel first (quietly to reduce noise)
-    log_cmd_no_tee pip install --upgrade pip setuptools wheel
+final_output() {
+  local python_version=$("$ANSIBLE_VENV_DIR/bin/python3" --version 2>/dev/null | awk '{print $2}')
+  local ansible_version=$("$ANSIBLE_VENV_DIR/bin/pip show ansible | grep Version | awk '{print $2}'")
 
-    # Install Ansible (quietly)
-    log_cmd_no_tee pip install ansible
+  echo ""
+  success "Ansible installation complete!"
+  echo "Installed Python Version: $python_version"
+  echo "Installed Ansible Version: $ansible_version"
+  echo "Virtual Environment Location: $ANSIBLE_VENV_DIR"
+  echo ""
+  echo "To activate the virtual environment, run: source $ANSIBLE_VENV_DIR/bin/activate"
+  echo "To deactivate, run: deactivate"
+  echo ""
+  echo "Ansible tools (ansible, ansible-playbook, etc.) are now available in /usr/local/bin."
+  echo ""
+  echo "To uninstall, deactivate the virtual environment and remove the '$ANSIBLE_VENV_DIR' directory."
+  echo ""
+  info "Detailed installation log can be found at: $LOG_FILE"
+  echo ""
+}
 
-    # Deactivate is automatic when subshell exits
-) || error "Failed during virtual environment operations (pip install?). Check log." # Catch errors in the subshell
+# --- Main Script ---
+info "Starting Ansible installation..."
 
-# === Symlink globally ===
-info "Creating global symlinks in /usr/local/bin..."
-for tool in ansible ansible-playbook ansible-galaxy ansible-doc ansible-config ansible-console ansible-connection ansible-inventory ansible-vault; do
-     if [ -f "$VENV_DIR/bin/$tool" ]; then
-         log_cmd ln -sf "$VENV_DIR/bin/$tool" "/usr/local/bin/$tool"
-     else
-         warn "Executable $tool not found in venv $VENV_DIR/bin/. Skipping symlink."
-     fi
-done
+check_command wget
+check_command tar
+check_command make
+check_command gcc
+check_command python3
+check_command pip
 
-# === Configure ansible.cfg (Minimalist approach) ===
-ANSIBLE_CFG_DIR="/etc/ansible"
-ANSIBLE_CFG="$ANSIBLE_CFG_DIR/ansible.cfg"
-info "Configuring global Ansible settings ($ANSIBLE_CFG)..."
-log_cmd mkdir -p "$ANSIBLE_CFG_DIR"
+install_dependencies
 
-# Get the Python site-packages path *within the venv*
-# This relies on standard venv layout but is more robust than parsing pythonX.Y
-VENV_SITE_PACKAGES=$("$VENV_DIR/bin/python" -c "import site; print(site.getsitepackages()[0])")
-if [ -z "$VENV_SITE_PACKAGES" ] || [ ! -d "$VENV_SITE_PACKAGES" ]; then
-    error "Could not determine site-packages directory within the virtual environment!"
-fi
-VENV_COLLECTIONS_PATH="$VENV_SITE_PACKAGES/ansible_collections"
+install_python
 
-# Create ansible.cfg only setting the venv collections path
-# Ansible will merge this with user (~/.ansible.cfg) and project (./ansible.cfg) configs
-cat > "$ANSIBLE_CFG" <<EOF
-# Ansible configuration managed by installation script
-# Ansible will search multiple paths for collections, including:
-# - $VENV_COLLECTIONS_PATH (defined below)
-# - ~/.ansible/collections
-# - /usr/share/ansible/collections
-# See Ansible documentation for full path precedence.
-[defaults]
-collections_path = $VENV_COLLECTIONS_PATH:/usr/share/ansible/collections
+setup_virtual_environment
 
-# Example: Uncomment and set if needed
-# inventory = $ANSIBLE_CFG_DIR/hosts
-# library = /usr/share/my_modules/
-# remote_user = user
-# ask_pass = false
+install_ansible
 
-[privilege_escalation]
-# Example:
-# become = true
-# become_method = sudo
-# become_user = root
-# become_ask_pass = false
-EOF
-info "Created/Updated $ANSIBLE_CFG with venv collection path."
+create_symlinks
 
-# === Cleanup (Optional) ===
-if [ "$CLEANUP_SOURCE" = true ] && [ -n "$PY_BUILD_SRC_DIR" ] && [ -d "$PY_BUILD_SRC_DIR" ]; then
-    info "Cleaning up Python source files..."
-    log_cmd rm -rf "$PY_BUILD_SRC_DIR"
-    log_cmd rm -f "/usr/src/$PY_BUILD_TARBALL"
-fi
+configure_ansible_cfg
 
-# === Check versions ===
-info "Verifying installation..."
-PY_VER=$($PY_CMD --version 2>&1) || PY_VER="N/A"
-# Use the symlinked ansible command
-ANSIBLE_VER=$(ansible --version | head -n 1 2>&1) || ANSIBLE_VER="N/A"
-ANSIBLE_CFG_VER=$(ansible --version | grep "config file" 2>&1) || ANSIBLE_CFG_VER="Config file not reported"
+cleanup
 
-# === Final output ===
-echo -e "\n${GREEN}==============================================================${NC}"
-success " Ansible installation script completed!"
-echo -e "${GREEN}==============================================================${NC}\n"
-echo -e "${BLUE}Python Used:${NC}              ${GREEN}$PY_CMD ($PY_VER)${NC}"
-echo -e "${BLUE}Ansible Version:${NC}          ${GREEN}$ANSIBLE_VER${NC}"
-echo -e "${BLUE}Ansible Config:${NC}           ${GREEN}$ANSIBLE_CFG_VER${NC}"
-echo -e "${BLUE}Virtual Environment:${NC}      ${GREEN}$VENV_DIR${NC}"
-echo ""
-echo -e "${BLUE}To activate manually:${NC}     ${GREEN}source $VENV_DIR/bin/activate${NC}"
-echo -e "${BLUE}To uninstall (basic):${NC}   ${GREEN}sudo rm -rf $VENV_DIR /usr/local/bin/ansible* /etc/ansible${NC}"
-echo -e "${BLUE}Full Log File:${NC}            ${GREEN}$LOG_FILE${NC}"
-echo -e "\n${BLUE}System Info:${NC}"
-uname -a | tee -a "$LOG_FILE"
-date | tee -a "$LOG_FILE"
-echo -e "\n${GREEN}-------------------- Installation Finished --------------------${NC}"
+final_output
+
+info "Ansible installation script finished."
 
 exit 0
