@@ -40,3 +40,8 @@ curl -fsSL https://raw.githubusercontent.com/Stensel8/basic-scripts/refs/heads/m
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Stensel8/basic-scripts/refs/heads/main/kubernetes_installer.sh | sudo bash
 ```
+
+## Enable-WinRM.ps1
+```ps1
+irm https://raw.githubusercontent.com/Stensel8/basic-scripts/refs/heads/main/Enable-WinRM.ps1 | iex
+```

@@ -232,6 +232,9 @@ info "Activating virtual environment and installing/upgrading pip and Ansible...
     pip --version >> "$LOG_FILE" 2>&1
     log_cmd_no_tee pip install --upgrade pip setuptools wheel
     log_cmd_no_tee pip install ansible
+    # === Install additional Ansible dependencies (for connecting with Windows based systems/WinRM) ===
+    log_cmd_no_tee pip install pywinrm requests-ntlm
+    log_cmd_no_tee pip install ansible
 ) || error "Failed during virtual environment operations."
 
 # === Create Global Symlinks for Ansible Tools ===
