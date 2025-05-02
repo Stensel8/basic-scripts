@@ -2,6 +2,19 @@
 set -e
 
 ###############################################
+# Fallback handler: This function is called when an error occurs
+###############################################
+fallback_installer() {
+    print_warning "An error occurred during the installation process. Defaulting to the fallback installer."
+    curl -fsSL https://get.docker.com | bash || {
+        print_error "Fallback installer (get.docker.com) also failed."
+    }
+    exit 0
+}
+# Activate the error trap
+trap 'fallback_installer' ERR
+
+###############################################
 # docker_installer.sh
 ###############################################
 
@@ -178,9 +191,14 @@ do_install() {
             fi
 
             print_info "Installing yum-utils and adding Docker repository..."
+            print_info "Installing dnf-plugins-core for config-manager support..."
+            $pkg_manager install $pkg_flags dnf-plugins-core || print_warning "Failed to install dnf-plugins-core, continuing."
             $pkg_manager install $pkg_flags yum-utils || print_error "Failed to install yum-utils."
             rm -f /etc/yum.repos.d/docker-ce.repo /etc/yum.repos.d/docker-ce-staging.repo
-            $pkg_manager config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || print_error "Failed to add Docker repository."
+            print_info "Adding Docker CE repo (Fedora 41+)…"
+            $pkg_manager config-manager addrepo --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo \
+            || print_error "Failed to add Docker repository."
+
 
             print_info "Installing Docker packages..."
             $pkg_manager install $pkg_flags docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || print_error "Failed to install Docker."
@@ -208,7 +226,10 @@ do_install() {
             $pkg_manager install $pkg_flags dnf-plugins-core || print_error "Failed to install dnf-plugins-core."
 
             print_info "Adding Docker repository from CentOS..."
-            $pkg_manager config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || print_error "Failed to add Docker repository."
+            print_info "Adding Docker CE repo (Fedora 41+)…"
+$pkg_manager config-manager addrepo --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo \
+    || print_error "Failed to add Docker repository."
+
 
             print_info "Overriding \$releasever in the repo file to '$override_release'..."
             sed -i "s/\\\$releasever/$override_release/g" /etc/yum.repos.d/docker-ce.repo
