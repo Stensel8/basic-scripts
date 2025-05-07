@@ -4,36 +4,32 @@ set -e
 ###############################################
 # NGINX Open Source Stable Installer
 #
-# Installs the stable release (e.g. v1.26.3) of NGINX on
-# Amazon Linux 2023 by removing old NGINX packages and
-# setting up the stable repository from nginx.org.
+# Supported distributions:
+# - Amazon Linux 2023
+# - Fedora
+# - RHEL / CentOS
+# - Debian
+# - Ubuntu
 ###############################################
 
-# Define color codes for output
+# Define colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m'  # No Color
 
-# Logging functions for clear progress reporting
-print_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-    exit 1
-}
+# Logging functions
+print_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
+print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+print_error()   { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
-# Ensure the script runs as root
+# Ensure script is run as root
 if [ "$EUID" -ne 0 ]; then
     print_error "This script must be run as root."
 fi
 
 ###############################################
-# Detect Amazon Linux 2023 Only
+# Detect distribution and version
 ###############################################
 if [ -r /etc/os-release ]; then
     . /etc/os-release
@@ -43,27 +39,55 @@ else
     print_error "Cannot detect OS; /etc/os-release not found."
 fi
 
-if [[ "$distro" != "amzn" || "$version_id" != "2023" ]]; then
-    print_error "This stable installer is written only for Amazon Linux 2023."
-fi
-
-print_info "Detected Amazon Linux 2023."
+print_info "Detected distribution: $distro $version_id"
 
 ###############################################
-# Remove Existing NGINX Packages and Repo File
+# Remove any existing NGINX packages
 ###############################################
-print_info "Removing any existing NGINX packages..."
-dnf remove -y nginx\* || yum remove -y nginx\* || true
+remove_existing() {
+    print_info "Removing existing NGINX packages..."
+    case "$distro" in
+        debian|ubuntu)
+            apt-get remove -y nginx* || true
+            ;;
+        fedora)
+            dnf remove -y nginx* || true
+            ;;
+        amzn|rhel|centos)
+            # RHEL / CentOS / Amazon Linux may have yum or dnf
+            dnf remove -y nginx* 2>/dev/null \
+                || yum remove -y nginx* 2>/dev/null \
+                || true
+            ;;
+        *)
+            print_error "Unknown distribution for removal: $distro"
+            ;;
+    esac
+}
 
-REPO_FILE="/etc/yum.repos.d/nginx.repo"
-print_info "Removing existing NGINX repo file..."
-rm -f "$REPO_FILE"
+remove_existing
 
 ###############################################
-# Configure the Stable Repository from nginx.org
+# Add the NGINX GPG key (Debian/Ubuntu)
 ###############################################
-print_info "Configuring NGINX stable repository..."
-cat > "$REPO_FILE" <<EOF
+add_debian_key() {
+    print_info "Importing NGINX signing key..."
+    curl -fsSL https://nginx.org/keys/nginx_signing.key \
+        | apt-key add - \
+        || print_error "Failed to add NGINX GPG key."
+}
+
+###############################################
+# Configure repository per distribution
+###############################################
+configure_repo() {
+    print_info "Configuring NGINX stable repository..."
+
+    case "$distro" in
+        # Amazon Linux 2023
+        amzn)
+            REPO_FILE="/etc/yum.repos.d/nginx.repo"
+            cat > "$REPO_FILE" <<EOF
 [nginx-stable]
 name=NGINX Stable for Amazon Linux 2023
 baseurl=http://nginx.org/packages/amzn/2023/\$basearch/
@@ -72,34 +96,101 @@ enabled=1
 gpgkey=https://nginx.org/keys/nginx_signing.key
 module_hotfixes=true
 EOF
+            ;;
+
+        # Fedora
+        fedora)
+            if command -v dnf &>/dev/null; then
+                dnf install -y dnf-plugins-core
+                dnf config-manager --add-repo=https://nginx.org/packages/fedora/"$version_id"/\$basearch/
+            else
+                print_error "dnf not found on Fedora."
+            fi
+            ;;
+
+        # RHEL / CentOS (7, 8, 9)
+        rhel|centos)
+            major=$(echo "$version_id" | cut -d. -f1)
+            REPO_FILE="/etc/yum.repos.d/nginx.repo"
+            cat > "$REPO_FILE" <<EOF
+[nginx-stable]
+name=NGINX Stable for RHEL/CentOS $major
+baseurl=http://nginx.org/packages/rhel/$major/\$basearch/
+gpgcheck=1
+enabled=1
+gpgkey=https://nginx.org/keys/nginx_signing.key
+EOF
+            ;;
+
+        # Debian
+        debian)
+            codename=$(lsb_release -cs)
+            echo "deb http://nginx.org/packages/debian $codename nginx" \
+                > /etc/apt/sources.list.d/nginx.list
+            echo "deb-src http://nginx.org/packages/debian $codename nginx" \
+                >> /etc/apt/sources.list.d/nginx.list
+            add_debian_key
+            ;;
+
+        # Ubuntu
+        ubuntu)
+            codename=$(lsb_release -cs)
+            echo "deb http://nginx.org/packages/ubuntu $codename nginx" \
+                > /etc/apt/sources.list.d/nginx.list
+            echo "deb-src http://nginx.org/packages/ubuntu $codename nginx" \
+                >> /etc/apt/sources.list.d/nginx.list
+            add_debian_key
+            ;;
+
+        *)
+            print_error "No repo configuration for distribution: $distro"
+            ;;
+    esac
+}
+
+configure_repo
 
 ###############################################
-# Clean Cache & Disable Default Amazon Repos for NGINX
+# Update package cache / metadata
 ###############################################
-print_info "Cleaning DNF cache..."
-dnf clean all || true
+print_info "Updating package cache / repo metadata..."
+case "$distro" in
+    debian|ubuntu)
+        apt-get update || print_error "apt update failed."
+        ;;
+    fedora)
+        dnf clean all
+        ;;
+    amzn|rhel|centos)
+        dnf clean all || yum clean all
+        ;;
+esac
 
-# Disable default Amazon Linux repos so the official nginx.org package is used.
-disable_repos="--disablerepo=amazonlinux --disablerepo=amzn2-core"
-print_info "Temporarily disabling Amazon repos: $disable_repos"
+###############################################
+# Install NGINX stable
+###############################################
+print_info "Installing NGINX stable..."
+case "$distro" in
+    debian|ubuntu)
+        apt-get install -y nginx || print_error "apt install failed."
+        ;;
+    fedora|amzn|rhel|centos)
+        dnf install -y nginx || yum install -y nginx \
+            || print_error "dnf/yum install failed."
+        ;;
+esac
 
 ###############################################
-# Install NGINX from the Stable Repository
-###############################################
-print_info "Installing NGINX stable from nginx.org..."
-dnf install -y nginx --enablerepo=nginx-stable $disable_repos || print_error "NGINX stable installation failed."
-
-###############################################
-# Verify the Installed Version (should start with 1.26.)
+# Verify installed version
 ###############################################
 installed_version="$(nginx -v 2>&1 | awk -F'/' '{print $2}')"
-print_info "NGINX version detected: $installed_version"
+print_info "Detected NGINX version: $installed_version"
 
-if [[ "$installed_version" != 1.26.* ]]; then
-    print_error "Expected a 1.26.x version but got: $installed_version."
+if [[ "$installed_version" != 1.28.* ]]; then
+    print_error "Expected a 1.28.x version but got: $installed_version"
 fi
 
-print_success "NGINX Stable installation completed successfully!"
-print_info "You can start NGINX with: sudo systemctl start nginx (if applicable) or run 'nginx' manually."
+print_success "NGINX stable installation completed successfully!"
+print_info "Start NGINX with: sudo systemctl start nginx (or run 'nginx' manually)."
 
 exit 0
