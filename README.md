@@ -11,8 +11,8 @@ To run a script directly without saving it, use the following command in a termi
 
 For example:
 
-### Run Directly
-To run the installer script directly without saving it, use the following commands in a terminal.
+### nginx_installer.sh
+
 
 #### Default nginx (mainline)
 ```bash
