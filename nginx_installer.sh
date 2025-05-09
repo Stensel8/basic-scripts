@@ -2,9 +2,12 @@
 set -e
 
 ###############################################
-# NGINX Open Source Mainline Installer
+# NGINX Open Source Installer
 #
-# Supported distributions:
+# Usage: sudo ./nginx_installer.sh [mainline|stable]
+# Default channel: mainline
+#
+# Supported distros:
 # - Amazon Linux 2023
 # - Fedora
 # - RHEL / CentOS
@@ -12,26 +15,58 @@ set -e
 # - Ubuntu
 ###############################################
 
-# Channel & key
-NGINX_CHANNEL="mainline"
+# Kies channel
+CHANNEL="${1:-mainline}"
+if [[ "$CHANNEL" != "mainline" && "$CHANNEL" != "stable" ]]; then
+  echo "Usage: $0 [mainline|stable]"
+  exit 1
+fi
+
+# Key en repo info
+NGINX_CHANNEL="$CHANNEL"
 NGINX_GPG_KEY_URL="https://nginx.org/keys/nginx_signing.key"
 KEYRING="/usr/share/keyrings/nginx-archive-keyring.gpg"
 
-# Colors & logging
-RED='\033[0;31m' GREEN='\033[0;32m' BLUE='\033[0;34m' NC='\033[0m'
+# Wat verwachtte versie prefix?
+if [ "$CHANNEL" = "mainline" ]; then
+  EXPECTED_PREFIX="1.27."
+else
+  EXPECTED_PREFIX="1.28."
+fi
+
+# Kleuren & logfuncties
+RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; NC='\033[0m'
 info()    { echo -e "${BLUE}[INFO]${NC}    $1"; }
 success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 error()   { echo -e "${RED}[ERROR]${NC}   $1"; exit 1; }
 
-# must be root
+# Root?
 [ "$EUID" -eq 0 ] || error "Run as root."
 
-# detect OS
+# Prerequisites installeren
+info "Installing prerequisites..."
+if   command -v apt-get >/dev/null; then
+    apt-get update && apt-get install -y lsb-release gnupg gnupg2 curl && apt-get clean
+elif command -v dnf >/dev/null; then
+    dnf install -y redhat-lsb-core gnupg gnupg2 curl && dnf clean all
+elif command -v yum >/dev/null; then
+    yum install -y redhat-lsb-core gnupg gnupg2 curl && yum clean all
+elif command -v zypper >/dev/null; then
+    zypper refresh && zypper install -y lsb-release gnupg gnupg2 curl && zypper clean --all
+elif command -v pacman >/dev/null; then
+    pacman -Sy --noconfirm && pacman -S --noconfirm lsb-release gnupg gnupg2 curl && pacman -Sc --noconfirm
+elif command -v apk >/dev/null; then
+    apk update && apk add lsb-release gnupg curl && rm -rf /var/cache/apk/*
+else
+    error "No supported package manager found."
+fi
+
+# OS-detectie
 . /etc/os-release || error "Cannot read /etc/os-release."
 distro=${ID,,} version=${VERSION_ID}
 info "Detected distro: $distro $version"
 
-# remove old nginx
+# Verwijder oude nginx
 info "Removing existing NGINX packages..."
 case "$distro" in
   debian|ubuntu) apt-get remove -y nginx* || true ;;
@@ -44,12 +79,11 @@ case "$distro" in
   *) error "Unsupported distro: $distro" ;;
 esac
 
-# wipe out old repo files
+# Oude repo’s weghalen
 info "Cleaning out old repo files..."
-rm -f /etc/yum.repos.d/nginx.repo \
-      /etc/apt/sources.list.d/nginx.list
+rm -f /etc/yum.repos.d/nginx.repo /etc/apt/sources.list.d/nginx.list
 
-# helper for Debian/Ubuntu key
+# Key-import helper
 add_key() {
   info "Importing NGINX key..."
   if command -v gpg >/dev/null; then
@@ -65,7 +99,7 @@ add_key() {
   fi
 }
 
-# write repo, then test it
+# Repo wegschrijven en testen
 USE_DISTRO=false
 write_repo() {
   info "Configuring NGINX $NGINX_CHANNEL repo..."
@@ -82,7 +116,6 @@ module_hotfixes=true
 EOF
       REPO_URL="http://nginx.org/packages/$NGINX_CHANNEL/amzn/2023/\$basearch"
       ;;
-
     fedora)
       cat > /etc/yum.repos.d/nginx.repo <<EOF
 [nginx-$NGINX_CHANNEL]
@@ -94,7 +127,6 @@ gpgkey=$NGINX_GPG_KEY_URL
 EOF
       REPO_URL="http://nginx.org/packages/$NGINX_CHANNEL/fedora/$version/\$basearch"
       ;;
-
     rhel|centos)
       major=${version%%.*}
       cat > /etc/yum.repos.d/nginx.repo <<EOF
@@ -107,7 +139,6 @@ gpgkey=$NGINX_GPG_KEY_URL
 EOF
       REPO_URL="http://nginx.org/packages/$NGINX_CHANNEL/rhel/$major/\$basearch"
       ;;
-
     debian)
       codename=$(lsb_release -cs)
       add_key
@@ -115,10 +146,8 @@ EOF
         > /etc/apt/sources.list.d/nginx.list
       echo "deb-src $KEYOPT http://nginx.org/packages/$NGINX_CHANNEL/debian $codename nginx" \
         >> /etc/apt/sources.list.d/nginx.list
-      # repourl not used for APT
       return
       ;;
-
     ubuntu)
       codename=$(lsb_release -cs)
       add_key
@@ -128,49 +157,43 @@ EOF
         >> /etc/apt/sources.list.d/nginx.list
       return
       ;;
-
     *)
       error "Unsupported distro: $distro"
       ;;
   esac
 
-  # test the repo URL for Fedora/RHEL/Amazon
-  if [ -n "$REPO_URL" ]; then
-    # expand $basearch
-    arch=$(uname -m)
-    url=${REPO_URL//\$basearch/$arch}/repodata/repomd.xml
-    if ! curl --head --silent --fail "$url" >/dev/null; then
-      info "Custom repo not found at $url, falling back to distro nginx"
-      rm -f /etc/yum.repos.d/nginx.repo
-      USE_DISTRO=true
-    fi
+  # Test custom repo
+  arch=$(uname -m)
+  url=${REPO_URL//\$basearch/$arch}/repodata/repomd.xml
+  if ! curl --head --silent --fail "$url" >/dev/null; then
+    info "Custom repo niet gevonden ($url), terugvallen op distro-pakket"
+    rm -f /etc/yum.repos.d/nginx.repo
+    USE_DISTRO=true
   fi
 }
 
 write_repo
 
-# update cache
+# Cache bijwerken
 info "Updating caches..."
 case "$distro" in
-  debian|ubuntu) apt-get update ;; 
+  debian|ubuntu) apt-get update ;;
   fedora)        dnf clean all ;;
   amzn|rhel|centos)
     dnf clean all || yum clean all ;;
 esac
 
-# install
+# Installeren
 info "Installing NGINX..."
 case "$distro" in
   debian|ubuntu)
-    apt-get install -y nginx \
-      || error "apt install failed"
+    apt-get install -y nginx || error "apt install failed"
     ;;
   fedora)
     if [ "$USE_DISTRO" = true ]; then
       dnf install -y nginx || error "dnf install failed"
     else
-      dnf install -y nginx --enablerepo=nginx-$NGINX_CHANNEL \
-        || error "dnf install failed"
+      dnf install -y nginx --enablerepo=nginx-$NGINX_CHANNEL || error "dnf install failed"
     fi
     ;;
   amzn|rhel|centos)
@@ -184,12 +207,12 @@ case "$distro" in
     ;;
 esac
 
-# version check (strict only if custom repo used)
+# Versie-check
 ver=$(nginx -v 2>&1 | awk -F/ '{print $2}')
 info "Detected NGINX version: $ver"
-if [ "$USE_DISTRO" = false ] && [[ "$ver" != 1.27.* ]]; then
-  error "Expected 1.27.x from custom repo but got $ver"
+if [ "$USE_DISTRO" = false ] && [[ "$ver" != $EXPECTED_PREFIX* ]]; then
+  error "Expected ${EXPECTED_PREFIX}x but got $ver"
 fi
 
-success "NGINX mainline installed."
-info "Run: sudo systemctl start nginx"
+success "NGINX $NGINX_CHANNEL installed."
+info "Start met: sudo systemctl start nginx"
