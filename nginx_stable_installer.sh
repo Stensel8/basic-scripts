@@ -16,20 +16,33 @@ BLUE='\033[0;34m'
 NC='\033[0m'  # No Color
 
 # Logging functions for clear progress reporting
-print_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-    exit 1
-}
+print_info()  { echo -e "${BLUE}[INFO]${NC}  $1"; }
+print_success(){ echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+print_error()  { echo -e "${RED}[ERROR]${NC}   $1"; exit 1; }
 
 # Ensure the script runs as root
 if [ "$EUID" -ne 0 ]; then
     print_error "This script must be run as root."
+fi
+
+###############################################
+# Install prerequisites (lsb-release, GPG tools)
+###############################################
+print_info "Installing prerequisites..."
+if   command -v apt-get >/dev/null; then
+    apt-get update && apt-get install -y lsb-release gnupg gnupg2 && apt-get clean
+elif command -v dnf >/dev/null; then
+    dnf install -y redhat-lsb-core gnupg gnupg2 && dnf clean all
+elif command -v yum >/dev/null; then
+    yum install -y redhat-lsb-core gnupg gnupg2 && yum clean all
+elif command -v zypper >/dev/null; then
+    zypper refresh && zypper install -y lsb-release gnupg gnupg2 && zypper clean --all
+elif command -v pacman >/dev/null; then
+    pacman -Sy --noconfirm && pacman -S --noconfirm lsb-release gnupg gnupg2 && pacman -Sc --noconfirm
+elif command -v apk >/dev/null; then
+    apk update && apk add lsb-release gnupg && rm -rf /var/cache/apk/*
+else
+    print_error "No supported package manager found."
 fi
 
 ###############################################
