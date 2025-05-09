@@ -11,14 +11,25 @@ To run a script directly without saving it, use the following command in a termi
 
 For example:
 
-## nginx_stable_installer.sh
+### Run Directly
+To run the installer script directly without saving it, use the following commands in a terminal.
+
+#### Default nginx (mainline)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Stensel8/basic-scripts/refs/heads/main/nginx_stable_installer.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Stensel8/basic-scripts/main/nginx_installer.sh \
+  | sudo bash
 ```
 
-## nginx_mainline_installer.sh
+#### Stable
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Stensel8/basic-scripts/refs/heads/main/nginx_mainline_installer.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Stensel8/basic-scripts/main/nginx_installer.sh \
+  | sudo bash -s stable
+```
+
+#### Mainline
+```bash
+curl -fsSL https://raw.githubusercontent.com/Stensel8/basic-scripts/main/nginx_installer.sh \
+  | sudo bash -s mainline
 ```
 
 ## docker_installer.sh
