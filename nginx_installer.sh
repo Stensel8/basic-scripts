@@ -187,7 +187,30 @@ esac
 info "Installing NGINX..."
 case "$distro" in
   debian|ubuntu)
-    apt-get install -y nginx || error "apt install failed"
+    info "Building NGINX from source..."
+    # Build dependencies
+    apt-get install -y build-essential libpcre3-dev zlib1g-dev libssl-dev || error "Prerequisites failed"
+    # Kies juiste tarball
+    if [ "$NGINX_CHANNEL" = "stable" ]; then
+      URL="https://nginx.org/download/nginx-1.28.0.tar.gz"
+    else
+      URL="https://nginx.org/download/nginx-1.27.5.tar.gz"
+    fi
+    curl -fsSL "$URL" -o /tmp/nginx.tar.gz
+    tar xzf /tmp/nginx.tar.gz -C /tmp
+    srcdir=$(tar -tzf /tmp/nginx.tar.gz | head -1 | cut -f1 -d"/")
+    cd /tmp/$srcdir
+    ./configure \
+      --prefix=/etc/nginx \
+      --sbin-path=/usr/sbin/nginx \
+      --conf-path=/etc/nginx/nginx.conf \
+      --pid-path=/var/run/nginx.pid \
+      --with-http_ssl_module \
+      --with-http_v2_module \
+      --with-stream \
+      --with-stream_ssl_module \
+      --with-http_gzip_static_module || error "Configure failed"
+    make && make install || error "Build/install failed"
     ;;
   fedora)
     if [ "$USE_DISTRO" = true ]; then
