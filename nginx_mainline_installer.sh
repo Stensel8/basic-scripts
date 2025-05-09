@@ -26,21 +26,21 @@ error()   { echo -e "${RED}[ERROR]${NC}   $1"; exit 1; }
 ###############################################
 # Install prerequisites (lsb-release, GPG tools)
 ###############################################
-print_info "Installing prerequisites..."
+info "Installing prerequisites..."
 if   command -v apt-get >/dev/null; then
-    apt-get update && apt-get install -y lsb-release gnupg gnupg2 && apt-get clean
+    apt-get update && apt-get install -y lsb-release gnupg gnupg2 curl && apt-get clean
 elif command -v dnf >/dev/null; then
-    dnf install -y redhat-lsb-core gnupg gnupg2 && dnf clean all
+    dnf install -y redhat-lsb-core gnupg gnupg2 curl && dnf clean all
 elif command -v yum >/dev/null; then
-    yum install -y redhat-lsb-core gnupg gnupg2 && yum clean all
+    yum install -y redhat-lsb-core gnupg gnupg2 curl && yum clean all
 elif command -v zypper >/dev/null; then
-    zypper refresh && zypper install -y lsb-release gnupg gnupg2 && zypper clean --all
+    zypper refresh && zypper install -y lsb-release gnupg gnupg2 curl && zypper clean --all
 elif command -v pacman >/dev/null; then
-    pacman -Sy --noconfirm && pacman -S --noconfirm lsb-release gnupg gnupg2 && pacman -Sc --noconfirm
+    pacman -Sy --noconfirm && pacman -S --noconfirm lsb-release gnupg gnupg2 curl && pacman -Sc --noconfirm
 elif command -v apk >/dev/null; then
-    apk update && apk add lsb-release gnupg && rm -rf /var/cache/apk/*
+    apk update && apk add lsb-release gnupg curl && rm -rf /var/cache/apk/*
 else
-    print_error "No supported package manager found."
+    error "No supported package manager found."
 fi
 
 # must be root
@@ -135,7 +135,6 @@ EOF
         > /etc/apt/sources.list.d/nginx.list
       echo "deb-src $KEYOPT http://nginx.org/packages/$NGINX_CHANNEL/debian $codename nginx" \
         >> /etc/apt/sources.list.d/nginx.list
-      # repourl not used for APT
       return
       ;;
 
@@ -154,13 +153,12 @@ EOF
       ;;
   esac
 
-  # test the repo URL for Fedora/RHEL/Amazon
+  # test custom repo URL
   if [ -n "$REPO_URL" ]; then
-    # expand $basearch
     arch=$(uname -m)
     url=${REPO_URL//\$basearch/$arch}/repodata/repomd.xml
     if ! curl --head --silent --fail "$url" >/dev/null; then
-      info "Custom repo not found at $url, falling back to distro nginx"
+      info "Custom repo niet gevonden ($url), terugvallen op distro-pakket"
       rm -f /etc/yum.repos.d/nginx.repo
       USE_DISTRO=true
     fi
@@ -172,7 +170,7 @@ write_repo
 # update cache
 info "Updating caches..."
 case "$distro" in
-  debian|ubuntu) apt-get update ;; 
+  debian|ubuntu) apt-get update ;;
   fedora)        dnf clean all ;;
   amzn|rhel|centos)
     dnf clean all || yum clean all ;;
@@ -182,15 +180,13 @@ esac
 info "Installing NGINX..."
 case "$distro" in
   debian|ubuntu)
-    apt-get install -y nginx \
-      || error "apt install failed"
+    apt-get install -y nginx || error "apt install failed"
     ;;
   fedora)
     if [ "$USE_DISTRO" = true ]; then
       dnf install -y nginx || error "dnf install failed"
     else
-      dnf install -y nginx --enablerepo=nginx-$NGINX_CHANNEL \
-        || error "dnf install failed"
+      dnf install -y nginx --enablerepo=nginx-$NGINX_CHANNEL || error "dnf install failed"
     fi
     ;;
   amzn|rhel|centos)
@@ -204,7 +200,7 @@ case "$distro" in
     ;;
 esac
 
-# version check (strict only if custom repo used)
+# versie-check (strenger als custom repo gebruikt)
 ver=$(nginx -v 2>&1 | awk -F/ '{print $2}')
 info "Detected NGINX version: $ver"
 if [ "$USE_DISTRO" = false ] && [[ "$ver" != 1.27.* ]]; then
