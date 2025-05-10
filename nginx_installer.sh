@@ -196,9 +196,9 @@ EOF
       return 1
       ;;
   esac
-  
-  # Verify installation and version
-  return $(verify_nginx_version)
+    # Verify installation and version
+  verify_nginx_version
+  return $?
 }
 
 #########################################################################
@@ -215,9 +215,8 @@ install_nginx_from_source() {
   else
     VER="${MAINLINE_VERSION}"
   fi
-  
-  # Create build directory
-  BUILD_DIR="/usr/local/src/nginx"
+    # Create build directory
+  BUILD_DIR="/tmp/nginx-build"
   log_info "Creating build directory: ${BUILD_DIR}"
   mkdir -p ${BUILD_DIR} && cd ${BUILD_DIR}
   
@@ -230,6 +229,35 @@ install_nginx_from_source() {
   log_info "Verifying package signature"
   gpg --batch --import <(curl -fsSL ${NGINX_KEY_URL})
   gpg --batch --verify nginx.tar.gz.asc nginx.tar.gz || log_warn "Signature verification failed, continuing anyway"
+    # Check for required build dependencies and install them
+  log_info "Checking for and installing build dependencies"
+  case "$DISTRO" in
+    debian)
+      log_info "Installing build dependencies for Debian/Ubuntu"
+      apt-get update -qq
+      apt-get install -y build-essential libpcre3-dev zlib1g-dev libssl-dev
+      ;;
+    rhel|fedora)
+      log_info "Installing build dependencies for RHEL/Fedora"
+      if command -v dnf &>/dev/null; then
+        dnf -y install gcc make pcre-devel zlib-devel openssl-devel
+      else
+        yum -y install gcc make pcre-devel zlib-devel openssl-devel
+      fi
+      ;;
+    suse)
+      log_info "Installing build dependencies for openSUSE"
+      zypper install -y gcc make pcre-devel zlib-devel libopenssl-devel
+      ;;
+    arch)
+      log_info "Installing build dependencies for Arch Linux"
+      pacman -S --noconfirm gcc make pcre zlib openssl
+      ;;
+    *)
+      log_error "Unsupported distribution for source build"
+      return 1
+      ;;
+  esac
   
   # Extract and build
   log_info "Extracting source code"
