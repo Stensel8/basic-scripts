@@ -69,13 +69,26 @@ verify_nginx_version() {
   # Get NGINX version
   NGINX_VER=$(nginx -v 2>&1)
   log_info "Installed NGINX version: $NGINX_VER"
-  
-  # Verify version matches selected channel
-  if [ "$CHANNEL" = "stable" ] && ! echo "$NGINX_VER" | grep -q "1.28"; then
-    log_error "Installed version does not match stable channel (expected 1.28.x)"
-    return 1
-  elif [ "$CHANNEL" = "mainline" ] && ! echo "$NGINX_VER" | grep -q "1.27"; then
-    log_error "Installed version does not match mainline channel (expected 1.27.x)"
+    # If using a local distribution package, don't enforce exact version match
+  if echo "$NGINX_VER" | grep -q "nginx/[0-9]"; then
+    # Check if we were able to get a package from the official NGINX repo
+    if grep -q "packages/${CHANNEL}" /etc/yum.repos.d/nginx.repo 2>/dev/null || 
+       grep -q "packages/${CHANNEL}" /etc/apt/sources.list.d/nginx.list 2>/dev/null; then
+      
+      # Only then check version match
+      if [ "$CHANNEL" = "stable" ] && ! echo "$NGINX_VER" | grep -q "1.28"; then
+        log_error "Installed version does not match stable channel (expected 1.28.x)"
+        return 1
+      elif [ "$CHANNEL" = "mainline" ] && ! echo "$NGINX_VER" | grep -q "1.27"; then
+        log_error "Installed version does not match mainline channel (expected 1.27.x)"
+        return 1
+      fi
+    else
+      # Using distribution package, log a warning but accept it
+      log_warn "Using distribution-provided NGINX package (${NGINX_VER}), not official NGINX repo package"
+    fi
+  else
+    log_error "Unexpected NGINX version format: ${NGINX_VER}"
     return 1
   fi
   
@@ -140,8 +153,7 @@ EOF
           log_warn "Fedora $RELVER might not have official nginx packages, trying anyway"
         fi
       fi
-      
-      # Configure repository
+        # Configure repository
       log_info "Configuring ${DISTRO} repository for ${CHANNEL} channel"
       cat <<EOF >/etc/yum.repos.d/nginx.repo
 [nginx-${CHANNEL}]
@@ -327,19 +339,27 @@ EOF
 #########################################################################
 
 # Parse command line options
-while getopts "s:" opt; do
-    case $opt in
-        s) 
-            if [[ "$OPTARG" =~ ^(stable|mainline)$ ]]; then
-                CHANNEL="$OPTARG"
-            else
-                log_error "Channel must be 'stable' or 'mainline'"
-                usage
-            fi
-            ;;
-        *) usage ;;
-    esac
-done
+# First check for direct parameters (bash -s stable)
+if [ $# -eq 1 ] && [[ "$1" =~ ^(stable|mainline)$ ]]; then
+    CHANNEL="$1"
+    log_info "Setting channel to $CHANNEL (from direct parameter)"
+# Otherwise parse traditional options
+else
+    while getopts "s:" opt; do
+        case $opt in
+            s) 
+                if [[ "$OPTARG" =~ ^(stable|mainline)$ ]]; then
+                    CHANNEL="$OPTARG"
+                    log_info "Setting channel to $CHANNEL (from -s option)"
+                else
+                    log_error "Channel must be 'stable' or 'mainline'"
+                    usage
+                fi
+                ;;
+            *) usage ;;
+        esac
+    done
+fi
 
 # Check for root privileges
 log_info "Checking for root privileges"
@@ -347,10 +367,8 @@ log_info "Checking for root privileges"
 
 # Detect distribution
 DISTRO=$(detect_distro)
-log_info "Detected distribution: $DISTRO"
-
-# Try package installation first
-log_info "Attempting to install NGINX from official packages"
+log_info "Detected distribution: $DISTRO"  # Try package installation first
+log_info "Attempting to install NGINX from official packages (channel: $CHANNEL)"
 if install_nginx_package; then
   log_success "NGINX ($CHANNEL) installed via package manager"
   exit 0
