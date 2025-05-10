@@ -101,36 +101,40 @@ verify_nginx_version() {
 
 install_nginx_package() {
   case "$DISTRO" in
-    debian)
-      # Handle Ubuntu Noble release which isn't directly supported
-      if [ "$(lsb_release -cs)" = "noble" ]; then
-        log_warn "Ubuntu Noble not directly supported, using jammy repositories instead"
-        RELEASE="jammy"
+    debian)      # Detect Ubuntu or Debian
+      if grep -qi "ubuntu" /etc/os-release; then
         OS_TYPE="ubuntu"
-      else
         RELEASE="$(lsb_release -cs)"
         
-        # Detect Ubuntu or Debian
-        if grep -qi "ubuntu" /etc/os-release; then
-          OS_TYPE="ubuntu"
-        else
-          OS_TYPE="debian"
-        fi
+        # Use the actual release name for Ubuntu - Noble and Plucky are supported
+        log_info "Detected Ubuntu ${RELEASE}"
+      else
+        OS_TYPE="debian"
+        RELEASE="$(lsb_release -cs)"
       fi
       
       # Import NGINX signing key
       log_info "Importing NGINX signing key"
       curl -fsSL ${NGINX_KEY_URL} | gpg --dearmor \
         | tee /usr/share/keyrings/nginx-archive-keyring.gpg >/dev/null
-      
-      # Configure repository
+        # Configure repository
       log_info "Configuring ${OS_TYPE} repository for ${CHANNEL} channel"
-      cat <<EOF >/etc/apt/sources.list.d/nginx.list
-# nginx ${CHANNEL}
+        # Different repository URL formats for Ubuntu vs Debian
+      if [ "$OS_TYPE" = "ubuntu" ]; then
+        cat <<EOF >/etc/apt/sources.list.d/nginx.list
+# nginx ${CHANNEL} for Ubuntu
+deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] \
+  https://nginx.org/packages/ubuntu/ \
+  ${RELEASE} nginx
+EOF
+      else
+        cat <<EOF >/etc/apt/sources.list.d/nginx.list
+# nginx ${CHANNEL} for Debian
 deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] \
   http://nginx.org/packages/${CHANNEL}/${OS_TYPE} \
   ${RELEASE} nginx
 EOF
+      fi
 
       # Update package lists and install
       if ! apt-get update 2>/dev/null; then
