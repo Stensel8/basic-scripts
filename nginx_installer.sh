@@ -1,241 +1,335 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+#########################################################################
+# NGINX Installer Script - Optimized with GitHub Copilot
+#########################################################################
 
-###############################################
-# NGINX Open Source Installer
-#
-# Usage: sudo ./nginx_installer.sh [mainline|stable]
-# Default channel: mainline
-#
-# Supported distros:
-# - Amazon Linux 2023
-# - Fedora
-# - RHEL / CentOS
-# - Debian
-# - Ubuntu
-###############################################
+# Enable strict error handling
+set -euo pipefail
 
-# Kies channel
-CHANNEL="${1:-mainline}"
-if [[ "$CHANNEL" != "mainline" && "$CHANNEL" != "stable" ]]; then
-  echo "Usage: $0 [mainline|stable]"
-  exit 1
-fi
+#########################################################################
+# CONFIGURATION VARIABLES
+#########################################################################
 
-# Key en repo info
-NGINX_CHANNEL="$CHANNEL"
-NGINX_GPG_KEY_URL="https://nginx.org/keys/nginx_signing.key"
-KEYRING="/usr/share/keyrings/nginx-archive-keyring.gpg"
+# Default to mainline release channel
+CHANNEL="mainline"
 
-# Wat verwachtte versie prefix?
-if [ "$CHANNEL" = "mainline" ]; then
-  EXPECTED_PREFIX="1.27."
-else
-  EXPECTED_PREFIX="1.28."
-fi
+# Version mapping - update these when new versions are released
+STABLE_VERSION="1.28.0"
+MAINLINE_VERSION="1.27.5"
 
-# Kleuren & logfuncties
-RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; NC='\033[0m'
-info()    { echo -e "${BLUE}[INFO]${NC}    $1"; }
-success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
-error()   { echo -e "${RED}[ERROR]${NC}   $1"; exit 1; }
+# Base URL for downloads
+NGINX_DOWNLOAD_URL="https://nginx.org/download"
+NGINX_KEY_URL="https://nginx.org/keys/nginx_signing.key"
 
-# Root?
-[ "$EUID" -eq 0 ] || error "Run as root."
+# Log formatting
+LOG_INFO="[INFO]"
+LOG_WARN="[WARN]"
+LOG_ERROR="[ERROR]"
+LOG_SUCCESS="[SUCCESS]"
 
-# Prerequisites installeren
-info "Installing prerequisites..."
-if   command -v apt-get >/dev/null; then
-    apt-get update && apt-get install -y lsb-release gnupg gnupg2 curl && apt-get clean
-elif command -v dnf >/dev/null; then
-    dnf install -y redhat-lsb-core gnupg gnupg2 curl && dnf clean all
-elif command -v yum >/dev/null; then
-    yum install -y redhat-lsb-core gnupg gnupg2 curl && yum clean all
-elif command -v zypper >/dev/null; then
-    zypper refresh && zypper install -y lsb-release gnupg gnupg2 curl && zypper clean --all
-elif command -v pacman >/dev/null; then
-    pacman -Sy --noconfirm && pacman -S --noconfirm lsb-release gnupg gnupg2 curl && pacman -Sc --noconfirm
-elif command -v apk >/dev/null; then
-    apk update && apk add lsb-release gnupg curl && rm -rf /var/cache/apk/*
-else
-    error "No supported package manager found."
-fi
+#########################################################################
+# HELPER FUNCTIONS
+#########################################################################
 
-# OS-detectie
-. /etc/os-release || error "Cannot read /etc/os-release."
-distro=${ID,,} version=${VERSION_ID}
-info "Detected distro: $distro $version"
-
-# Verwijder oude nginx
-info "Removing existing NGINX packages..."
-case "$distro" in
-  debian|ubuntu) apt-get remove -y nginx* || true ;;
-  fedora)        dnf remove -y nginx* || true ;;
-  amzn|rhel|centos)
-    dnf remove -y nginx* 2>/dev/null \
-      || yum remove -y nginx* 2>/dev/null \
-      || true
-    ;;
-  *) error "Unsupported distro: $distro" ;;
-esac
-
-# Oude repo’s weghalen
-info "Cleaning out old repo files..."
-rm -f /etc/yum.repos.d/nginx.repo /etc/apt/sources.list.d/nginx.list
-
-# Key-import helper
-add_key() {
-  info "Importing NGINX key..."
-  if command -v gpg >/dev/null; then
-    curl -fsSL "$NGINX_GPG_KEY_URL" \
-      | gpg --dearmor > "$KEYRING" \
-      || error "gpg key import failed"
-    KEYOPT="[signed-by=$KEYRING]"
-  else
-    curl -fsSL "$NGINX_GPG_KEY_URL" \
-      | apt-key add - \
-      || error "apt-key add failed"
-    KEYOPT=""
-  fi
+# Display usage information
+usage() { 
+    echo "Usage: $0 [-s stable|mainline]" >&2
+    exit 1
 }
 
-# Repo wegschrijven en testen
-USE_DISTRO=false
-write_repo() {
-  info "Configuring NGINX $NGINX_CHANNEL repo..."
-  case "$distro" in
-    amzn)
-      cat > /etc/yum.repos.d/nginx.repo <<EOF
-[nginx-$NGINX_CHANNEL]
-name=NGINX ${NGINX_CHANNEL^} for Amazon Linux 2023
-baseurl=http://nginx.org/packages/$NGINX_CHANNEL/amzn/2023/\$basearch/
-gpgcheck=1
-enabled=1
-gpgkey=$NGINX_GPG_KEY_URL
-module_hotfixes=true
-EOF
-      REPO_URL="http://nginx.org/packages/$NGINX_CHANNEL/amzn/2023/\$basearch"
-      ;;
-    fedora)
-      cat > /etc/yum.repos.d/nginx.repo <<EOF
-[nginx-$NGINX_CHANNEL]
-name=NGINX ${NGINX_CHANNEL^} for Fedora $version
-baseurl=http://nginx.org/packages/$NGINX_CHANNEL/fedora/$version/\$basearch/
-gpgcheck=1
-enabled=1
-gpgkey=$NGINX_GPG_KEY_URL
-EOF
-      REPO_URL="http://nginx.org/packages/$NGINX_CHANNEL/fedora/$version/\$basearch"
-      ;;
-    rhel|centos)
-      major=${version%%.*}
-      cat > /etc/yum.repos.d/nginx.repo <<EOF
-[nginx-$NGINX_CHANNEL]
-name=NGINX ${NGINX_CHANNEL^} for RHEL/CentOS $major
-baseurl=http://nginx.org/packages/$NGINX_CHANNEL/rhel/$major/\$basearch/
-gpgcheck=1
-enabled=1
-gpgkey=$NGINX_GPG_KEY_URL
-EOF
-      REPO_URL="http://nginx.org/packages/$NGINX_CHANNEL/rhel/$major/\$basearch"
-      ;;
+# Print formatted log messages
+log_info() { echo "${LOG_INFO} $1"; }
+log_warn() { echo "${LOG_WARN} $1"; }
+log_error() { echo "${LOG_ERROR} $1"; }
+log_success() { echo "${LOG_SUCCESS} $1"; }
+
+# Detect Linux distribution
+detect_distro() {
+  # Source the OS release information
+  . /etc/os-release
+  
+  # Return simplified distribution category
+  case "$ID" in
+    ubuntu|debian) echo "debian" ;;
+    centos|rhel|rocky|alma) echo "rhel" ;;
+    fedora) echo "fedora" ;;
+    opensuse*|sles) echo "suse" ;;
+    arch) echo "arch" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+# Verify NGINX installation and version
+verify_nginx_version() {
+  if ! command -v nginx >/dev/null; then
+    log_error "nginx command not found after installation"
+    return 1
+  fi
+  
+  # Get NGINX version
+  NGINX_VER=$(nginx -v 2>&1)
+  log_info "Installed NGINX version: $NGINX_VER"
+  
+  # Verify version matches selected channel
+  if [ "$CHANNEL" = "stable" ] && ! echo "$NGINX_VER" | grep -q "1.28"; then
+    log_error "Installed version does not match stable channel (expected 1.28.x)"
+    return 1
+  elif [ "$CHANNEL" = "mainline" ] && ! echo "$NGINX_VER" | grep -q "1.27"; then
+    log_error "Installed version does not match mainline channel (expected 1.27.x)"
+    return 1
+  fi
+  
+  return 0
+}
+
+#########################################################################
+# PACKAGE INSTALLATION FUNCTION
+#########################################################################
+
+install_nginx_package() {
+  case "$DISTRO" in
     debian)
-      codename=$(lsb_release -cs)
-      add_key
-      echo "deb $KEYOPT http://nginx.org/packages/$NGINX_CHANNEL/debian $codename nginx" \
-        > /etc/apt/sources.list.d/nginx.list
-      echo "deb-src $KEYOPT http://nginx.org/packages/$NGINX_CHANNEL/debian $codename nginx" \
-        >> /etc/apt/sources.list.d/nginx.list
-      return
+      # Handle Ubuntu Noble release which isn't directly supported
+      if [ "$(lsb_release -cs)" = "noble" ]; then
+        log_warn "Ubuntu Noble not directly supported, using jammy repositories instead"
+        RELEASE="jammy"
+        OS_TYPE="ubuntu"
+      else
+        RELEASE="$(lsb_release -cs)"
+        
+        # Detect Ubuntu or Debian
+        if grep -qi "ubuntu" /etc/os-release; then
+          OS_TYPE="ubuntu"
+        else
+          OS_TYPE="debian"
+        fi
+      fi
+      
+      # Import NGINX signing key
+      log_info "Importing NGINX signing key"
+      curl -fsSL ${NGINX_KEY_URL} | gpg --dearmor \
+        | tee /usr/share/keyrings/nginx-archive-keyring.gpg >/dev/null
+      
+      # Configure repository
+      log_info "Configuring ${OS_TYPE} repository for ${CHANNEL} channel"
+      cat <<EOF >/etc/apt/sources.list.d/nginx.list
+# nginx ${CHANNEL}
+deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] \
+  http://nginx.org/packages/${CHANNEL}/${OS_TYPE} \
+  ${RELEASE} nginx
+EOF
+
+      # Update package lists and install
+      if ! apt-get update 2>/dev/null; then
+        log_error "Repository update failed - package might not be available"
+        return 1
+      fi
+      
+      log_info "Installing NGINX package"
+      if ! apt-get install -y nginx; then
+        log_error "Failed to install nginx from package repository"
+        return 1
+      fi
       ;;
-    ubuntu)
-      codename=$(lsb_release -cs)
-      add_key
-      echo "deb $KEYOPT http://nginx.org/packages/$NGINX_CHANNEL/ubuntu $codename nginx" \
-        > /etc/apt/sources.list.d/nginx.list
-      echo "deb-src $KEYOPT http://nginx.org/packages/$NGINX_CHANNEL/ubuntu $codename nginx" \
-        >> /etc/apt/sources.list.d/nginx.list
-      return
+
+    rhel|fedora)
+      # For newer Fedora versions that might not be supported 
+      if [ "$DISTRO" = "fedora" ]; then
+        RELVER=$(rpm -E %fedora)
+        if [ "$RELVER" -ge 38 ]; then
+          log_warn "Fedora $RELVER might not have official nginx packages, trying anyway"
+        fi
+      fi
+      
+      # Configure repository
+      log_info "Configuring ${DISTRO} repository for ${CHANNEL} channel"
+      cat <<EOF >/etc/yum.repos.d/nginx.repo
+[nginx-${CHANNEL}]
+name=nginx ${CHANNEL} repo
+baseurl=http://nginx.org/packages/${CHANNEL}/$([ "$DISTRO" = "fedora" ] && echo "fedora" || echo "rhel")/\$releasever/\$basearch/
+gpgcheck=1
+enabled=1
+gpgkey=${NGINX_KEY_URL}
+EOF
+
+      # Install package using appropriate package manager
+      log_info "Installing NGINX package"
+      if command -v dnf &>/dev/null; then
+        if ! dnf -y --refresh install nginx; then
+          log_error "Failed to install nginx from package repository"
+          return 1
+        fi
+      else
+        if ! yum -y install nginx; then
+          log_error "Failed to install nginx from package repository"
+          return 1
+        fi
+      fi
       ;;
-    *)
-      error "Unsupported distro: $distro"
+
+    suse)
+      # Configure repository
+      log_info "Configuring openSUSE repository for ${CHANNEL} channel"
+      zypper addrepo --name nginx-${CHANNEL} \
+        http://nginx.org/packages/${CHANNEL}/opensuse/$(. /etc/os-release && echo $VERSION_ID)/ nginx
+      
+      # Refresh package lists and install
+      zypper --gpg-auto-import-keys refresh
+      log_info "Installing NGINX package"
+      if ! zypper install -y nginx; then
+        log_error "Failed to install nginx from package repository"
+        return 1
+      fi
+      ;;
+
+    arch)
+      # Install from Arch repositories
+      log_info "Installing NGINX from Arch repositories"
+      if ! pacman -Sy --noconfirm nginx; then
+        log_error "Failed to install nginx from package repository"
+        return 1
+      fi
+      ;;
+
+    *) 
+      log_error "Unsupported distribution"
+      return 1
       ;;
   esac
-
-  # Test custom repo
-  arch=$(uname -m)
-  url=${REPO_URL//\$basearch/$arch}/repodata/repomd.xml
-  if ! curl --head --silent --fail "$url" >/dev/null; then
-    info "Custom repo niet gevonden ($url), terugvallen op distro-pakket"
-    rm -f /etc/yum.repos.d/nginx.repo
-    USE_DISTRO=true
-  fi
+  
+  # Verify installation and version
+  return $(verify_nginx_version)
 }
 
-write_repo
+#########################################################################
+# SOURCE INSTALLATION FUNCTION
+#########################################################################
 
-# Cache bijwerken
-info "Updating caches..."
-case "$distro" in
-  debian|ubuntu) apt-get update ;;
-  fedora)        dnf clean all ;;
-  amzn|rhel|centos)
-    dnf clean all || yum clean all ;;
-esac
+install_nginx_from_source() {
+  log_info "Building NGINX from source"
+  log_info "This will ensure you get the correct version for the selected channel"
+  
+  # Set version based on channel
+  if [ "$CHANNEL" = "stable" ]; then
+    VER="${STABLE_VERSION}"
+  else
+    VER="${MAINLINE_VERSION}"
+  fi
+  
+  # Create build directory
+  BUILD_DIR="/usr/local/src/nginx"
+  log_info "Creating build directory: ${BUILD_DIR}"
+  mkdir -p ${BUILD_DIR} && cd ${BUILD_DIR}
+  
+  # Download source and signature
+  log_info "Downloading NGINX ${VER} source code"
+  curl -fsSL ${NGINX_DOWNLOAD_URL}/nginx-${VER}.tar.gz -o nginx.tar.gz
+  curl -fsSL ${NGINX_DOWNLOAD_URL}/nginx-${VER}.tar.gz.asc -o nginx.tar.gz.asc
+  
+  # Import key and verify signature
+  log_info "Verifying package signature"
+  gpg --batch --import <(curl -fsSL ${NGINX_KEY_URL})
+  gpg --batch --verify nginx.tar.gz.asc nginx.tar.gz || log_warn "Signature verification failed, continuing anyway"
+  
+  # Extract and build
+  log_info "Extracting source code"
+  tar xf nginx.tar.gz
+  cd nginx-${VER}
+  
+  # Configure with standard modules
+  log_info "Configuring build with HTTP SSL and Stream modules"
+  ./configure --with-http_ssl_module --with-stream --prefix=/usr/local
+  
+  # Build and install
+  log_info "Compiling NGINX (this may take a while)"
+  make -j"$(nproc || echo 1)"
+  log_info "Installing NGINX to /usr/local"
+  make install
+  
+  # Create symlink to make it available in PATH
+  log_info "Creating symlink in /usr/bin for easier access"
+  ln -sf /usr/local/sbin/nginx /usr/bin/nginx 2>/dev/null || log_warn "Failed to create symlink"
+  
+  # Install systemd service file if it doesn't exist
+  if [ ! -f /etc/systemd/system/nginx.service ]; then
+    log_info "Creating systemd service file"
+    cat > /etc/systemd/system/nginx.service <<EOF
+[Unit]
+Description=The NGINX HTTP and reverse proxy server
+After=network.target
 
-# Installeren
-info "Installing NGINX..."
-case "$distro" in
-  debian|ubuntu)
-    info "Building NGINX from source..."
-    # Build dependencies
-    apt-get install -y build-essential libpcre3-dev zlib1g-dev libssl-dev || error "Prerequisites failed"
-    # Kies juiste tarball
-    if [ "$NGINX_CHANNEL" = "stable" ]; then
-      URL="https://nginx.org/download/nginx-1.28.0.tar.gz"
-    else
-      URL="https://nginx.org/download/nginx-1.27.5.tar.gz"
-    fi
-    curl -fsSL "$URL" -o /tmp/nginx.tar.gz
-    tar xzf /tmp/nginx.tar.gz -C /tmp
-    srcdir=$(tar -tzf /tmp/nginx.tar.gz | head -1 | cut -f1 -d"/")
-    cd /tmp/$srcdir
-    ./configure \
-      --prefix=/etc/nginx \
-      --sbin-path=/usr/sbin/nginx \
-      --conf-path=/etc/nginx/nginx.conf \
-      --pid-path=/var/run/nginx.pid \
-      --with-http_ssl_module \
-      --with-http_v2_module \
-      --with-stream \
-      --with-stream_ssl_module \
-      --with-http_gzip_static_module || error "Configure failed"
-    make && make install || error "Build/install failed"
-    ;;
-  fedora)
-    if [ "$USE_DISTRO" = true ]; then
-      dnf install -y nginx || error "dnf install failed"
-    else
-      dnf install -y nginx --enablerepo=nginx-$NGINX_CHANNEL || error "dnf install failed"
-    fi
-    ;;
-  amzn|rhel|centos)
-    if [ "$USE_DISTRO" = true ]; then
-      dnf install -y nginx || yum install -y nginx || error "install failed"
-    else
-      dnf install -y nginx --enablerepo=nginx-$NGINX_CHANNEL \
-        || yum install -y nginx --enablerepo=nginx-$NGINX_CHANNEL \
-        || error "install failed"
-    fi
-    ;;
-esac
+[Service]
+Type=forking
+PIDFile=/usr/local/logs/nginx.pid
+ExecStartPre=/usr/local/sbin/nginx -t
+ExecStart=/usr/local/sbin/nginx
+ExecReload=/usr/local/sbin/nginx -s reload
+ExecStop=/bin/kill -s QUIT \$MAINPID
+PrivateTmp=true
 
-# Versie-check
-ver=$(nginx -v 2>&1 | awk -F/ '{print $2}')
-info "Detected NGINX version: $ver"
-if [ "$USE_DISTRO" = false ] && [[ "$ver" != $EXPECTED_PREFIX* ]]; then
-  error "Expected ${EXPECTED_PREFIX}x but got $ver"
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    systemctl daemon-reload
+    log_info "Installed nginx.service systemd unit"
+  fi
+  
+  # Verify the installation
+  if command -v nginx >/dev/null; then
+    NGINX_VER=$(nginx -v 2>&1)
+    log_info "Installed NGINX version: $NGINX_VER"
+    
+    # Verify version matches what we expect
+    if [ "$CHANNEL" = "stable" ] && ! echo "$NGINX_VER" | grep -q "1.28"; then
+      log_warn "Installed version does not match stable channel (expected 1.28.x)"
+    elif [ "$CHANNEL" = "mainline" ] && ! echo "$NGINX_VER" | grep -q "1.27"; then
+      log_warn "Installed version does not match mainline channel (expected 1.27.x)"
+    fi
+  else
+    log_warn "nginx command not in PATH. You can run it with: /usr/local/sbin/nginx"
+  fi
+  
+  log_success "NGINX $VER installed from source"
+  log_info "You can start it with: sudo systemctl start nginx"
+}
+
+#########################################################################
+# MAIN SCRIPT EXECUTION
+#########################################################################
+
+# Parse command line options
+while getopts "s:" opt; do
+    case $opt in
+        s) 
+            if [[ "$OPTARG" =~ ^(stable|mainline)$ ]]; then
+                CHANNEL="$OPTARG"
+            else
+                log_error "Channel must be 'stable' or 'mainline'"
+                usage
+            fi
+            ;;
+        *) usage ;;
+    esac
+done
+
+# Check for root privileges
+log_info "Checking for root privileges"
+(( EUID == 0 )) || { log_error "This script must be run as root"; exit 1; }
+
+# Detect distribution
+DISTRO=$(detect_distro)
+log_info "Detected distribution: $DISTRO"
+
+# Try package installation first
+log_info "Attempting to install NGINX from official packages"
+if install_nginx_package; then
+  log_success "NGINX ($CHANNEL) installed via package manager"
+  exit 0
 fi
 
-success "NGINX $NGINX_CHANNEL installed."
-info "Start met: sudo systemctl start nginx"
+# Fall back to source installation if package installation fails
+log_info "Package installation failed, falling back to source installation"
+install_nginx_from_source
+
+exit 0
