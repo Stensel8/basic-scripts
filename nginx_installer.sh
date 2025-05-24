@@ -20,15 +20,18 @@ log_warn() { echo -e "\033[1;33m[WARN]\033[0m $1"; }
 spinner() {
     local pid=$1
     local delay=0.1
-    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
-        local temp=${spinstr#?}
-        printf " %c  " "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\b\b\b\b"
+    # pick whatever frames you like; these unicode ones look nice:
+    local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+
+    # loop until $pid exits
+    while kill -0 "$pid" 2>/dev/null; do
+        for frame in "${frames[@]}"; do
+            printf "\r[%s] " "$frame"
+            sleep "$delay"
+        done
     done
-    printf "    \b\b\b\b"
+    # clean up the line when done
+    printf "\r    \r"
 }
 
 # Trap to cleanup on exit
