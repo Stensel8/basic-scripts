@@ -51,55 +51,72 @@ fi
 
 # Function to remove existing nginx installation
 remove_nginx() {
-    log_info "Removing existing nginx installation..."
-    
-    # Stop nginx service
-    log_info "Stopping nginx service..."
-    systemctl stop nginx 2>/dev/null || true
-    systemctl disable nginx 2>/dev/null || true
+    log_info "Removing existing nginx installation…"
 
-    # Remove systemd service file
-    log_info "Removing systemd service..."
-    rm -f /etc/systemd/system/nginx.service
+    # detect non-interactive (e.g. piped)
+    local NONINT=0
+    if ! [ -t 0 ]; then NONINT=1; fi
+
+    # 1) Purge distro packages
+    if command -v apt >/dev/null 2>&1; then
+        log_info "Purging Debian/Ubuntu package…"
+        DEBIAN_FRONTEND=noninteractive apt remove --purge -y nginx nginx-* || true
+        DEBIAN_FRONTEND=noninteractive apt autoremove -y || true
+    fi
+    if command -v dnf >/dev/null 2>&1; then
+        log_info "Removing Fedora/RHEL package…"
+        dnf remove -y nginx nginx-* || true
+        dnf autoremove -y || true
+    fi
+    if command -v brew >/dev/null 2>&1; then
+        log_info "Uninstalling Homebrew nginx…"
+        brew uninstall nginx || true
+    fi
+    if command -v snap >/dev/null 2>&1; then
+        log_info "Removing Snap nginx…"
+        snap remove nginx || true
+    fi
+
+    # 2) Stop & disable any service
+    log_info "Stopping and disabling services…"
+    systemctl stop nginx.service nginx.socket 2>/dev/null || true
+    systemctl disable nginx.service nginx.socket 2>/dev/null || true
+    service nginx stop 2>/dev/null || true
+
+    # reload systemd to clear stale units
     systemctl daemon-reload
 
-    # Remove nginx binaries
-    log_info "Removing nginx binaries..."
-    rm -f /usr/sbin/nginx /usr/bin/nginx
+    # 3) Remove binaries (known and discovered)
+    log_info "Deleting nginx binaries…"
+    rm -f /usr/sbin/nginx /usr/bin/nginx /usr/local/sbin/nginx
+    for bin in $(which nginx 2>/dev/null); do rm -f "$bin"; done
 
-    # Ask about configuration directory
-    read -p "Remove nginx configuration directory /etc/nginx? (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        rm -rf /etc/nginx
-        log_info "Removed /etc/nginx"
+    # 4) Remove configs
+    if [ $NONINT -eq 1 ]; then
+        log_info "Non-interactive: removing all config under /etc/nginx and /usr/local/etc/nginx"
+        rm -rf /etc/nginx /usr/local/etc/nginx
     else
-        log_warn "Keeping /etc/nginx (your configurations are safe)"
+        read -p "Remove /etc/nginx and /usr/local/etc/nginx? (y/N): " -n1 -r; echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            rm -rf /etc/nginx /usr/local/etc/nginx
+            log_info "Configs removed"
+        else
+            log_warn "Configs left in place"
+        fi
     fi
 
-    # Remove other nginx directories
-    log_info "Removing nginx directories..."
-    rm -rf /usr/local/nginx
-    rm -rf /var/cache/nginx
-    rm -rf /var/log/nginx
+    # 5) Clean up logs, cache, build dirs
+    log_info "Removing logs, cache, and build dirs…"
+    rm -rf /var/log/nginx /var/cache/nginx "$BUILD_DIR" /opt/nginx* /usr/local/nginx
 
-    # Remove nginx user
-    log_info "Removing nginx user..."
+    # 6) Kill stray processes
+    log_info "Killing lingering nginx processes…"
+    pkill -x nginx 2>/dev/null || true
+
+    # 7) Remove nginx user/group
+    log_info "Removing nginx user/group…"
     userdel nginx 2>/dev/null || true
     groupdel nginx 2>/dev/null || true
-
-    # Kill any remaining nginx processes (but not this script!)
-    # Only kill actual nginx processes, not scripts with nginx in the name
-    if pgrep -x nginx >/dev/null 2>&1; then
-        pkill -x nginx 2>/dev/null || true
-    fi
-
-    # Remove from package manager if installed that way
-    if command -v dnf >/dev/null 2>&1; then
-        dnf remove -y nginx nginx-* 2>/dev/null || true
-    elif command -v apt >/dev/null 2>&1; then
-        apt remove --purge -y nginx nginx-* 2>/dev/null || true
-    fi
 
     log_success "Nginx removal completed!"
     exit 0
