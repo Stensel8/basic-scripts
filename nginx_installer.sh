@@ -20,16 +20,28 @@ log_warn() { echo -e "\033[1;33m[WARN]\033[0m $1"; }
 spinner() {
     local pid=$1
     local delay=0.1
-    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
-        local temp=${spinstr#?}
-        printf " %c  " "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\b\b\b\b"
+    # pick whatever frames you like; these unicode ones look nice:
+    local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+
+    # loop until $pid exits
+    while kill -0 "$pid" 2>/dev/null; do
+        for frame in "${frames[@]}"; do
+            printf "\r[%s] " "$frame"
+            sleep "$delay"
+        done
     done
-    printf "    \b\b\b\b"
+    # clean up the line when done
+    printf "\r    \r"
 }
+
+# Trap to cleanup on exit
+cleanup() {
+    if [ -n "$BUILD_DIR" ] && [ -d "$BUILD_DIR" ]; then
+        log_info "Cleaning up build directory..."
+        rm -rf "$BUILD_DIR"
+    fi
+}
+trap cleanup EXIT INT TERM
 
 # Check for root privileges
 if [ "$EUID" -ne 0 ]; then
@@ -39,52 +51,72 @@ fi
 
 # Function to remove existing nginx installation
 remove_nginx() {
-    log_info "Removing existing nginx installation..."
-    
-    # Stop nginx service
-    log_info "Stopping nginx service..."
-    systemctl stop nginx 2>/dev/null || true
-    systemctl disable nginx 2>/dev/null || true
+    log_info "Removing existing nginx installation…"
 
-    # Remove systemd service file
-    log_info "Removing systemd service..."
-    rm -f /etc/systemd/system/nginx.service
+    # detect non-interactive (e.g. piped)
+    local NONINT=0
+    if ! [ -t 0 ]; then NONINT=1; fi
+
+    # 1) Purge distro packages
+    if command -v apt >/dev/null 2>&1; then
+        log_info "Purging Debian/Ubuntu package…"
+        DEBIAN_FRONTEND=noninteractive apt remove --purge -y nginx nginx-* || true
+        DEBIAN_FRONTEND=noninteractive apt autoremove -y || true
+    fi
+    if command -v dnf >/dev/null 2>&1; then
+        log_info "Removing Fedora/RHEL package…"
+        dnf remove -y nginx nginx-* || true
+        dnf autoremove -y || true
+    fi
+    if command -v brew >/dev/null 2>&1; then
+        log_info "Uninstalling Homebrew nginx…"
+        brew uninstall nginx || true
+    fi
+    if command -v snap >/dev/null 2>&1; then
+        log_info "Removing Snap nginx…"
+        snap remove nginx || true
+    fi
+
+    # 2) Stop & disable any service
+    log_info "Stopping and disabling services…"
+    systemctl stop nginx.service nginx.socket 2>/dev/null || true
+    systemctl disable nginx.service nginx.socket 2>/dev/null || true
+    service nginx stop 2>/dev/null || true
+
+    # reload systemd to clear stale units
     systemctl daemon-reload
 
-    # Remove nginx binaries
-    log_info "Removing nginx binaries..."
-    rm -f /usr/sbin/nginx /usr/bin/nginx
+    # 3) Remove binaries (known and discovered)
+    log_info "Deleting nginx binaries…"
+    rm -f /usr/sbin/nginx /usr/bin/nginx /usr/local/sbin/nginx
+    for bin in $(which nginx 2>/dev/null); do rm -f "$bin"; done
 
-    # Ask about configuration directory
-    read -p "Remove nginx configuration directory /etc/nginx? (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        rm -rf /etc/nginx
-        log_info "Removed /etc/nginx"
+    # 4) Remove configs
+    if [ $NONINT -eq 1 ]; then
+        log_info "Non-interactive: removing all config under /etc/nginx and /usr/local/etc/nginx"
+        rm -rf /etc/nginx /usr/local/etc/nginx
     else
-        log_warn "Keeping /etc/nginx (your configurations are safe)"
+        read -p "Remove /etc/nginx and /usr/local/etc/nginx? (y/N): " -n1 -r; echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            rm -rf /etc/nginx /usr/local/etc/nginx
+            log_info "Configs removed"
+        else
+            log_warn "Configs left in place"
+        fi
     fi
 
-    # Remove other nginx directories
-    log_info "Removing nginx directories..."
-    rm -rf /usr/local/nginx
-    rm -rf /var/cache/nginx
-    rm -rf /var/log/nginx
+    # 5) Clean up logs, cache, build dirs
+    log_info "Removing logs, cache, and build dirs…"
+    rm -rf /var/log/nginx /var/cache/nginx "$BUILD_DIR" /opt/nginx* /usr/local/nginx
 
-    # Remove nginx user
-    log_info "Removing nginx user..."
+    # 6) Kill stray processes
+    log_info "Killing lingering nginx processes…"
+    pkill -x nginx 2>/dev/null || true
+
+    # 7) Remove nginx user/group
+    log_info "Removing nginx user/group…"
     userdel nginx 2>/dev/null || true
     groupdel nginx 2>/dev/null || true
-
-    # Kill any remaining nginx processes
-    pkill -f nginx 2>/dev/null || true
-
-    # Remove from package manager if installed that way
-    if command -v dnf >/dev/null 2>&1; then
-        dnf remove -y nginx nginx-* 2>/dev/null || true
-    elif command -v apt >/dev/null 2>&1; then
-        apt remove --purge -y nginx nginx-* 2>/dev/null || true
-    fi
 
     log_success "Nginx removal completed!"
     exit 0
@@ -96,12 +128,23 @@ install_nginx() {
 
     # Install build dependencies
     log_info "Installing build dependencies..."
-    if dnf --version 2>/dev/null | grep -q "dnf5"; then
-        dnf install -y @development-tools >/dev/null 2>&1
-        dnf install -y pcre2-devel zlib-devel perl wget gcc make >/dev/null 2>&1
+    if command -v dnf >/dev/null 2>&1; then
+        # Fedora/RHEL/CentOS
+        if dnf --version 2>/dev/null | grep -q "dnf5"; then
+            dnf install -y @development-tools >/dev/null 2>&1
+            dnf install -y pcre2-devel zlib-devel perl wget gcc make >/dev/null 2>&1
+        else
+            dnf groupinstall -y "Development Tools" >/dev/null 2>&1 || true
+            dnf install -y pcre2-devel zlib-devel perl wget gcc make >/dev/null 2>&1
+        fi
+    elif command -v apt >/dev/null 2>&1; then
+        # Ubuntu/Debian
+        export DEBIAN_FRONTEND=noninteractive
+        apt update >/dev/null 2>&1
+        apt install -y build-essential libpcre2-dev zlib1g-dev perl wget gcc make >/dev/null 2>&1
     else
-        dnf groupinstall -y "Development Tools" >/dev/null 2>&1 || true
-        dnf install -y pcre2-devel zlib-devel perl wget gcc make >/dev/null 2>&1
+        log_error "Unsupported package manager. This script supports dnf and apt."
+        exit 1
     fi
 
     # Create build directory
@@ -301,6 +344,24 @@ EOF
 
 # Main script logic
 main() {
+    # Parse command line arguments
+    ACTION=""
+    if [ $# -gt 0 ]; then
+        case "$1" in
+            remove|uninstall)
+                ACTION="remove"
+                ;;
+            install|reinstall)
+                ACTION="install"
+                ;;
+            *)
+                log_error "Unknown argument: $1"
+                log_info "Usage: $0 [install|remove]"
+                exit 1
+                ;;
+        esac
+    fi
+
     # Check if nginx is already installed
     if command -v nginx >/dev/null 2>&1; then
         # Nginx is installed - get version info
@@ -310,38 +371,72 @@ main() {
         log_warn "Existing nginx installation detected:"
         log_info "Current version: nginx/$nginx_version"
         log_info "$openssl_info"
-        echo
-        echo "What would you like to do?"
-        echo "1) Remove existing nginx installation"
-        echo "2) Install new nginx (will remove existing first)"
-        echo "3) Cancel and exit"
-        echo
-        read -p "Please choose (1/2/3): " -n 1 -r
-        echo
         
-        case $REPLY in
-            1)
-                remove_nginx
-                ;;
-            2)
-                log_info "Proceeding with installation (existing nginx will be removed first)..."
-                # Remove existing nginx first, then install
-                systemctl stop nginx 2>/dev/null || true
-                rm -f /usr/sbin/nginx /usr/bin/nginx
-                install_nginx
-                ;;
-            3)
-                log_info "Operation cancelled by user"
-                exit 0
-                ;;
-            *)
-                log_error "Invalid choice. Exiting."
+        # If action was specified via command line, use it
+        if [ -n "$ACTION" ]; then
+            case "$ACTION" in
+                remove)
+                    remove_nginx
+                    exit 0
+                    ;;
+                install)
+                    log_info "Proceeding with installation (existing nginx will be removed first)..."
+                    systemctl stop nginx 2>/dev/null || true
+                    rm -f /usr/sbin/nginx /usr/bin/nginx
+                    install_nginx
+                    ;;
+            esac
+        else
+            # Check if we're running interactively
+            if [ -t 0 ]; then
+                # Interactive mode - show menu
+                echo
+                echo "What would you like to do?"
+                echo "1) Remove existing nginx installation"
+                echo "2) Install new nginx (will remove existing first)"
+                echo "3) Cancel and exit"
+                echo
+                read -p "Please choose (1/2/3): " -n 1 -r
+                echo
+                
+                case $REPLY in
+                    1)
+                        remove_nginx
+                        ;;
+                    2)
+                        log_info "Proceeding with installation (existing nginx will be removed first)..."
+                        systemctl stop nginx 2>/dev/null || true
+                        rm -f /usr/sbin/nginx /usr/bin/nginx
+                        install_nginx
+                        ;;
+                    3)
+                        log_info "Operation cancelled by user"
+                        exit 0
+                        ;;
+                    *)
+                        log_error "Invalid choice. Exiting."
+                        exit 1
+                        ;;
+                esac
+            else
+                # Non-interactive mode (piped) - show instructions
+                log_warn "Running in non-interactive mode. Specify an action:"
+                echo
+                log_info "To install/reinstall nginx:"
+                echo "  curl -fsSL https://raw.githubusercontent.com/Stensel8/scripts/main/nginx_installer.sh | sudo bash -s install"
+                echo
+                log_info "To remove nginx:"
+                echo "  curl -fsSL https://raw.githubusercontent.com/Stensel8/scripts/main/nginx_installer.sh | sudo bash -s remove"
+                echo
                 exit 1
-                ;;
-        esac
+            fi
+        fi
     else
         # No nginx installed - proceed with installation
         log_info "No existing nginx installation detected"
+        if [[ "$ACTION" == "remove" ]]; then
+            exit 0
+        fi
         install_nginx
     fi
 }
