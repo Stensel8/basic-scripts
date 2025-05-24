@@ -29,8 +29,16 @@ dnf remove -y nginx nginx-* 2>/dev/null || true
 
 # Install build dependencies
 log_info "Installing build dependencies..."
-dnf groupinstall -y "Development Tools"
-dnf install -y pcre2-devel zlib-devel openssl-devel wget
+# Fedora 42 uses dnf5 which has different syntax
+if dnf --version 2>/dev/null | grep -q "dnf5"; then
+    # dnf5 syntax
+    dnf install -y @development-tools
+    dnf install -y pcre2-devel zlib-devel openssl-devel wget gcc make
+else
+    # Legacy dnf syntax
+    dnf groupinstall -y "Development Tools"
+    dnf install -y pcre2-devel zlib-devel openssl-devel wget
+fi
 
 # Create build directory
 mkdir -p "$BUILD_DIR" && cd "$BUILD_DIR"
@@ -98,7 +106,12 @@ make install
 
 # Create nginx user
 log_info "Creating nginx user..."
-useradd --system --home /var/cache/nginx --shell /sbin/nologin --comment "nginx user" --user-group nginx 2>/dev/null || true
+if ! id nginx >/dev/null 2>&1; then
+    useradd --system --home /var/cache/nginx --shell /sbin/nologin --comment "nginx user" nginx
+    log_info "Created nginx user"
+else
+    log_info "nginx user already exists"
+fi
 
 # Create required directories
 log_info "Creating required directories..."
