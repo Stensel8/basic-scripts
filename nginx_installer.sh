@@ -400,8 +400,13 @@ main() {
             else
                 # Non-interactive mode (piped) - show instructions
                 log_warn "Running in non-interactive mode. Specify an action:"
-                log_info "To install:  curl -fsSL ... | sudo bash -s install"
-                log_info "To remove:   curl -fsSL ... | sudo bash -s remove"
+                echo
+                log_info "To install/reinstall nginx:"
+                echo "  curl -fsSL https://raw.githubusercontent.com/Stensel8/scripts/main/nginx_installer.sh | sudo bash -s install"
+                echo
+                log_info "To remove nginx:"
+                echo "  curl -fsSL https://raw.githubusercontent.com/Stensel8/scripts/main/nginx_installer.sh | sudo bash -s remove"
+                echo
                 exit 1
             fi
         fi
