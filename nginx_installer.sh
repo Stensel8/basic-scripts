@@ -31,6 +31,15 @@ spinner() {
     printf "    \b\b\b\b"
 }
 
+# Trap to cleanup on exit
+cleanup() {
+    if [ -n "$BUILD_DIR" ] && [ -d "$BUILD_DIR" ]; then
+        log_info "Cleaning up build directory..."
+        rm -rf "$BUILD_DIR"
+    fi
+}
+trap cleanup EXIT INT TERM
+
 # Check for root privileges
 if [ "$EUID" -ne 0 ]; then
     log_error "This script must be run as root: sudo $0"
@@ -76,8 +85,11 @@ remove_nginx() {
     userdel nginx 2>/dev/null || true
     groupdel nginx 2>/dev/null || true
 
-    # Kill any remaining nginx processes
-    pkill -f nginx 2>/dev/null || true
+    # Kill any remaining nginx processes (but not this script!)
+    # Only kill actual nginx processes, not scripts with nginx in the name
+    if pgrep -x nginx >/dev/null 2>&1; then
+        pkill -x nginx 2>/dev/null || true
+    fi
 
     # Remove from package manager if installed that way
     if command -v dnf >/dev/null 2>&1; then
@@ -96,12 +108,23 @@ install_nginx() {
 
     # Install build dependencies
     log_info "Installing build dependencies..."
-    if dnf --version 2>/dev/null | grep -q "dnf5"; then
-        dnf install -y @development-tools >/dev/null 2>&1
-        dnf install -y pcre2-devel zlib-devel perl wget gcc make >/dev/null 2>&1
+    if command -v dnf >/dev/null 2>&1; then
+        # Fedora/RHEL/CentOS
+        if dnf --version 2>/dev/null | grep -q "dnf5"; then
+            dnf install -y @development-tools >/dev/null 2>&1
+            dnf install -y pcre2-devel zlib-devel perl wget gcc make >/dev/null 2>&1
+        else
+            dnf groupinstall -y "Development Tools" >/dev/null 2>&1 || true
+            dnf install -y pcre2-devel zlib-devel perl wget gcc make >/dev/null 2>&1
+        fi
+    elif command -v apt >/dev/null 2>&1; then
+        # Ubuntu/Debian
+        export DEBIAN_FRONTEND=noninteractive
+        apt update >/dev/null 2>&1
+        apt install -y build-essential libpcre2-dev zlib1g-dev perl wget gcc make >/dev/null 2>&1
     else
-        dnf groupinstall -y "Development Tools" >/dev/null 2>&1 || true
-        dnf install -y pcre2-devel zlib-devel perl wget gcc make >/dev/null 2>&1
+        log_error "Unsupported package manager. This script supports dnf and apt."
+        exit 1
     fi
 
     # Create build directory
@@ -301,6 +324,24 @@ EOF
 
 # Main script logic
 main() {
+    # Parse command line arguments
+    ACTION=""
+    if [ $# -gt 0 ]; then
+        case "$1" in
+            remove|uninstall)
+                ACTION="remove"
+                ;;
+            install|reinstall)
+                ACTION="install"
+                ;;
+            *)
+                log_error "Unknown argument: $1"
+                log_info "Usage: $0 [install|remove]"
+                exit 1
+                ;;
+        esac
+    fi
+
     # Check if nginx is already installed
     if command -v nginx >/dev/null 2>&1; then
         # Nginx is installed - get version info
@@ -310,35 +351,60 @@ main() {
         log_warn "Existing nginx installation detected:"
         log_info "Current version: nginx/$nginx_version"
         log_info "$openssl_info"
-        echo
-        echo "What would you like to do?"
-        echo "1) Remove existing nginx installation"
-        echo "2) Install new nginx (will remove existing first)"
-        echo "3) Cancel and exit"
-        echo
-        read -p "Please choose (1/2/3): " -n 1 -r
-        echo
         
-        case $REPLY in
-            1)
-                remove_nginx
-                ;;
-            2)
-                log_info "Proceeding with installation (existing nginx will be removed first)..."
-                # Remove existing nginx first, then install
-                systemctl stop nginx 2>/dev/null || true
-                rm -f /usr/sbin/nginx /usr/bin/nginx
-                install_nginx
-                ;;
-            3)
-                log_info "Operation cancelled by user"
-                exit 0
-                ;;
-            *)
-                log_error "Invalid choice. Exiting."
+        # If action was specified via command line, use it
+        if [ -n "$ACTION" ]; then
+            case "$ACTION" in
+                remove)
+                    remove_nginx
+                    ;;
+                install)
+                    log_info "Proceeding with installation (existing nginx will be removed first)..."
+                    systemctl stop nginx 2>/dev/null || true
+                    rm -f /usr/sbin/nginx /usr/bin/nginx
+                    install_nginx
+                    ;;
+            esac
+        else
+            # Check if we're running interactively
+            if [ -t 0 ]; then
+                # Interactive mode - show menu
+                echo
+                echo "What would you like to do?"
+                echo "1) Remove existing nginx installation"
+                echo "2) Install new nginx (will remove existing first)"
+                echo "3) Cancel and exit"
+                echo
+                read -p "Please choose (1/2/3): " -n 1 -r
+                echo
+                
+                case $REPLY in
+                    1)
+                        remove_nginx
+                        ;;
+                    2)
+                        log_info "Proceeding with installation (existing nginx will be removed first)..."
+                        systemctl stop nginx 2>/dev/null || true
+                        rm -f /usr/sbin/nginx /usr/bin/nginx
+                        install_nginx
+                        ;;
+                    3)
+                        log_info "Operation cancelled by user"
+                        exit 0
+                        ;;
+                    *)
+                        log_error "Invalid choice. Exiting."
+                        exit 1
+                        ;;
+                esac
+            else
+                # Non-interactive mode (piped) - show instructions
+                log_warn "Running in non-interactive mode. Specify an action:"
+                log_info "To install:  curl -fsSL ... | sudo bash -s install"
+                log_info "To remove:   curl -fsSL ... | sudo bash -s remove"
                 exit 1
-                ;;
-        esac
+            fi
+        fi
     else
         # No nginx installed - proceed with installation
         log_info "No existing nginx installation detected"
