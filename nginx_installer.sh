@@ -357,6 +357,7 @@ main() {
             case "$ACTION" in
                 remove)
                     remove_nginx
+                    exit 0
                     ;;
                 install)
                     log_info "Proceeding with installation (existing nginx will be removed first)..."
@@ -413,6 +414,9 @@ main() {
     else
         # No nginx installed - proceed with installation
         log_info "No existing nginx installation detected"
+        if [[ "$ACTION" == "remove" ]]; then
+            exit 0
+        fi
         install_nginx
     fi
 }
