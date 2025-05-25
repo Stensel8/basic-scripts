@@ -1,5 +1,6 @@
 # WinRM configuration script
 # Run as Administrator
+Clear-Host
 
 # --- Step 1: Check Network Profiles and Warn for Public Networks ---
 $profiles = Get-NetConnectionProfile
@@ -29,6 +30,7 @@ if (-not $existingListener) {
     winrm create winrm/config/Listener?Address=*+Transport=HTTP @{Port="5985"}
 } else {
     Write-Output "A WinRM HTTP listener is already configured."
+    break
 }
 
 # --- Step 4: Create Firewall Rule for WinRM HTTP (Port 5985) ---
