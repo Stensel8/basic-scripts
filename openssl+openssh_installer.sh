@@ -352,7 +352,7 @@ build_openssh() {
 # Exclude system OpenSSL/OpenSSH packages
 exclude_system_packages() {
     log_step "Excluding system OpenSSL/OpenSSH packages from updates"
-    local packages_to_exclude=(openssl openssh-server openssh-clients)
+    local packages_to_exclude=(openssl openssh openssh-server openssh-clients)
     local excluded_successfully=true
 
     if command -v dnf >/dev/null; then
