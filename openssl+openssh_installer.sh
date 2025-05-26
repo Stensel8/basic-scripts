@@ -141,7 +141,12 @@ build_openssl() {
 # Build and install OpenSSH
 build_openssh() {
     info "Building OpenSSH ${OPENSSH_VERSION}..."
-    cd "$BUILD_DIR/openssh-${OPENSSH_VERSION}"
+    
+    # Find the extracted OpenSSH directory (handle different naming patterns)
+    local ssh_dir=$(find "$BUILD_DIR" -maxdepth 1 -type d -name "openssh-*" | head -1)
+    [[ -z "$ssh_dir" ]] && die "OpenSSH source directory not found in $BUILD_DIR"
+    
+    cd "$ssh_dir" || die "Cannot enter OpenSSH directory: $ssh_dir"
     
     # Configure with PAM support and custom OpenSSL
     ./configure \
@@ -192,8 +197,12 @@ configure_ssh() {
     # Backup existing config
     [[ -f /etc/ssh/sshd_config ]] && cp /etc/ssh/sshd_config "/etc/ssh/sshd_config.backup"
     
+    # Find sftp-server path
+    local sftp_path=$(find /usr -name sftp-server -type f 2>/dev/null | head -1)
+    [[ -z "$sftp_path" ]] && sftp_path="/usr/libexec/openssh/sftp-server"
+    
     # Create secure configuration (Windows 11 compatible, testssl.sh A+ rated)
-    cat > /etc/ssh/sshd_config << 'EOF'
+    cat > /etc/ssh/sshd_config << EOF
 # Secure OpenSSH Configuration
 # Compatible with Windows 11 and testssl.sh A+ rating
 
@@ -236,7 +245,7 @@ X11Forwarding no
 Compression no
 
 # SFTP subsystem
-Subsystem sftp /usr/libexec/openssh/sftp-server
+Subsystem sftp $sftp_path
 EOF
 
     # Generate new host keys if missing
@@ -324,8 +333,14 @@ install() {
     
     # Confirm installation
     if [[ "${CONFIRM:-}" != "yes" ]]; then
-        read -rp "Proceed with installation? This will reboot the system. [y/N] " answer
-        [[ "${answer,,}" != "y" ]] && die "Installation cancelled" 0
+        if [[ -t 0 ]]; then
+            # Interactive mode
+            read -rp "Proceed with installation? This will reboot the system. [y/N] " answer
+            [[ "${answer,,}" != "y" ]] && die "Installation cancelled" 0
+        else
+            # Non-interactive mode (piped)
+            die "Non-interactive mode detected. Use: curl ... | CONFIRM=yes sudo bash -s install" 0
+        fi
     fi
     
     # Run installation steps
