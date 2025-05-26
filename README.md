@@ -17,14 +17,24 @@ For example:
 
 This script installs a custom compiled NGINX with OpenSSL 3.5.0 for improved HTTP/3 and QUIC support. The build includes performance optimizations for your specific CPU architecture.
 
-#### Install Custom NGINX with HTTP/3 Support
+### nginx_installer.sh - Install
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Stensel8/scripts/main/nginx_installer.sh \
-  | sudo bash
+  | sudo env CONFIRM=yes bash -s install
+```
+### nginx_installer.sh - Verify
+```bash
+curl -fsSL https://raw.githubusercontent.com/Stensel8/scripts/main/nginx_installer.sh \
+  | sudo env CONFIRM=yes bash -s verify
+```
+### nginx_installer.sh - Remove
+```bash
+curl -fsSL https://raw.githubusercontent.com/Stensel8/scripts/main/nginx_installer.sh \
+  | sudo env CONFIRM=yes bash -s remove
 ```
 
 **Features:**
-- NGINX 1.28.0 (latest stable)
+- NGINX 1.28.0 (LTS version)
 - OpenSSL 3.5.0 with enhanced QUIC support
 - HTTP/3 module enabled
 - CPU-specific optimizations (`-march=native`)
@@ -32,6 +42,33 @@ curl -fsSL https://raw.githubusercontent.com/Stensel8/scripts/main/nginx_install
 - Full feature set including mail, stream, and all standard modules
 
 **Note:** The script will detect existing NGINX installations and offer to remove them before installing the custom build.
+
+### openssl+openssh_installer.sh - Install
+```bash
+curl -fsSL https://raw.githubusercontent.com/Stensel8/scripts/main/openssl+openssh_installer.sh \
+  | sudo env CONFIRM=yes bash -s install
+```
+### openssl+openssh_installer.sh - Verify
+```bash
+curl -fsSL https://raw.githubusercontent.com/Stensel8/scripts/main/openssl+openssh_installer.sh \
+  | sudo env CONFIRM=yes bash -s verify
+```
+### openssl+openssh_installer.sh - Remove
+```bash
+curl -fsSL https://raw.githubusercontent.com/Stensel8/scripts/main/openssl+openssh_installer.sh \
+  | sudo env CONFIRM=yes bash -s verify
+```
+**Features:**
+- OpenSSL 3.5.0 (LTS version)
+- OpenSSH 10.0 with enhanced security features
+- CPU-specific optimizations for better performance
+- Improved cryptographic algorithm support
+- Hardened security configurations by default
+- Complete with all standard modules and extensions
+
+**Note:** The script checks for existing OpenSSL and OpenSSH installations and will prompt before replacing them to avoid disrupting your system configuration.
+
+
 ## docker_installer.sh
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Stensel8/scripts/refs/heads/main/docker_installer.sh | sudo bash
