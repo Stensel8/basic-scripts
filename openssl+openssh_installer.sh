@@ -790,7 +790,23 @@ install() {
     
     echo -e "${YELLOW}⚠️  This installation will reboot the system when complete${NC}\n"
     
-    read -r -p "Install OpenSSL $OPENSSL_VERSION + OpenSSH $OPENSSH_VERSION? [y/N] " answer
+    # Check if CONFIRM environment variable is set
+    if [[ "${CONFIRM:-}" == "yes" ]]; then
+        log_info "Auto-confirming installation (CONFIRM=yes)"
+        answer="y"
+    else
+        # Try to read from terminal directly instead of stdin
+        if [ -t 0 ] || [ -c /dev/tty ]; then
+            # We have a terminal or /dev/tty is available
+            read -r -p "Install OpenSSL $OPENSSL_VERSION + OpenSSH $OPENSSH_VERSION? [y/N] " answer < /dev/tty
+        else
+            # No terminal available - common when piped via curl
+            log_error "No terminal available for input. For non-interactive installation, use:"
+            log_info "curl -fsSL https://raw.githubusercontent.com/Stensel8/scripts/new/openssl+openssh_installer.sh | CONFIRM=yes sudo bash -s install"
+            exit 1
+        fi
+    fi
+    
     [[ "${answer,,}" != "y" ]] && {
         log_info "Installation cancelled"
         exit 0
