@@ -374,7 +374,7 @@ link_all_binaries() {
     else
         log_error "Failed to link one or more SSH binaries."
         return 1
-    }
+    fi
 }
 
 # Create secure SSH config (testssl.sh compatible, Windows 11 compatible)
@@ -388,7 +388,7 @@ create_ssh_config() {
     local sftp_path=$(find /usr -name sftp-server -type f 2>/dev/null | head -1)
     [[ -z "$sftp_path" ]] && sftp_path="/usr/libexec/openssh/sftp-server"
     
-    cat > /etc/ssh/sshd_config << 'EOF'
+    cat > /etc/ssh/sshd_config << EOF
 # Ultra-secure OpenSSH config (testssl.sh A+ rated, Windows 11 compatible)
 # Generated: $(date)
 
