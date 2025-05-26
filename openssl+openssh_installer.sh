@@ -45,6 +45,7 @@ log_error() { echo -e "${RED}[✗]${NC} $1" >&2; }
 log_warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 log_step() { echo -e "${PURPLE}[→]${NC} ${BOLD}$1${NC}"; }
 log_detail() { echo -e "${GRAY}    $1${NC}"; }
+log_debug() { [[ "${SCRIPT_DEBUG:-0}" -eq 1 ]] && echo -e "${CYAN}[DEBUG]${NC} $1"; }
 
 # Spinner for long operations
 spinner() {
@@ -176,18 +177,29 @@ pkg_manager() {
     local action=$1
     shift
     local packages=("$@")
+    local pkg_cmd_output=""
     
     if command -v dnf >/dev/null; then
-        dnf "$action" -y "${packages[@]}" 2>&1
+        pkg_cmd_output=$(dnf "$action" -y "${packages[@]}" 2>&1)
     elif command -v yum >/dev/null; then
-        yum "$action" -y "${packages[@]}" 2>&1
+        pkg_cmd_output=$(yum "$action" -y "${packages[@]}" 2>&1)
     elif command -v apt-get >/dev/null; then
         export DEBIAN_FRONTEND=noninteractive
-        apt-get "$action" -y "${packages[@]}" 2>&1
+        # For apt-get, 'makecache' is 'update'
+        if [[ "$action" == "makecache" ]]; then
+            action="update"
+        fi
+        pkg_cmd_output=$(apt-get "$action" -y "${packages[@]}" 2>&1)
     else
         log_error "No supported package manager found"
         return 1
     fi
+    
+    local exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        log_debug "Package manager command failed. Output:\n$pkg_cmd_output"
+    fi
+    return $exit_code
 }
 
 # Backup configs
@@ -225,6 +237,9 @@ install_dependencies() {
         deps=(build-essential wget tar perl zlib1g-dev libpam0g-dev libselinux1-dev libedit-dev)
     fi
     
+    # Add lsof for checking open files during removal if needed (optional)
+    # deps+=(lsof)
+
     pkg_manager "install" "${deps[@]}" &>"$LOG_DIR/deps.log" &
     spinner $! "Installing packages"
     
@@ -332,6 +347,104 @@ build_openssh() {
     mkdir -p /var/lib/sshd && chmod 700 /var/lib/sshd
     
     log_success "OpenSSH installed to ${OPENSSH_INSTALL_PREFIX}"
+}
+
+# Exclude system OpenSSL/OpenSSH packages
+exclude_system_packages() {
+    log_step "Excluding system OpenSSL/OpenSSH packages from updates"
+    local packages_to_exclude=(openssl openssh-server openssh-clients)
+    local excluded_successfully=true
+
+    if command -v dnf >/dev/null; then
+        log_info "Using dnf to exclude: ${packages_to_exclude[*]}"
+        if dnf mark exclude "${packages_to_exclude[@]}" &>>"$LOG_DIR/pkg_exclude.log"; then
+            log_success "Packages excluded using dnf."
+        else
+            log_warn "Failed to exclude packages using dnf. Check $LOG_DIR/pkg_exclude.log"
+            excluded_successfully=false
+        fi
+    elif command -v yum >/dev/null; then
+        log_info "Using yum to exclude (adding to exclude line in yum.conf): ${packages_to_exclude[*]}"
+        local yum_conf="/etc/yum.conf"
+        if [[ ! -f "$yum_conf" ]]; then # RHEL/CentOS 8+ might use dnf.conf
+            yum_conf="/etc/dnf/dnf.conf"
+        fi
+        
+        if [[ -f "$yum_conf" ]]; then
+            # Remove existing exclude lines for these packages to avoid duplicates
+            for pkg in "${packages_to_exclude[@]}"; do
+                sed -i "/^exclude=.*$pkg/d" "$yum_conf"
+            done
+            # Add new exclude line
+            if grep -q "^exclude=" "$yum_conf"; then
+                sed -i "s/^exclude=\(.*\)/exclude=\1 ${packages_to_exclude[*]}/" "$yum_conf"
+            else
+                echo "exclude=${packages_to_exclude[*]}" >> "$yum_conf"
+            fi
+            log_success "Packages added to yum exclude list in $yum_conf."
+        else
+            log_warn "Could not find $yum_conf to exclude packages."
+            excluded_successfully=false
+        fi
+    elif command -v apt-mark >/dev/null; then
+        log_info "Using apt-mark to hold: ${packages_to_exclude[*]}"
+        if apt-mark hold "${packages_to_exclude[@]}" &>>"$LOG_DIR/pkg_exclude.log"; then
+            log_success "Packages held using apt-mark."
+        else
+            log_warn "Failed to hold packages using apt-mark. Check $LOG_DIR/pkg_exclude.log"
+            excluded_successfully=false
+        fi
+    else
+        log_warn "No supported package manager found to exclude system packages."
+        excluded_successfully=false
+    fi
+
+    if [[ "$excluded_successfully" == "true" ]]; then
+        log_info "System OpenSSL/OpenSSH packages will not be automatically updated by the package manager."
+    else
+        log_warn "Could not automatically exclude system OpenSSL/OpenSSH packages. Please do so manually if desired."
+    fi
+}
+
+# Unexclude system OpenSSL/OpenSSH packages
+unexclude_system_packages() {
+    log_step "Unexcluding system OpenSSL/OpenSSH packages"
+    local packages_to_unexclude=(openssl openssh-server openssh-clients)
+
+    if command -v dnf >/dev/null; then
+        log_info "Using dnf to unexclude: ${packages_to_unexclude[*]}"
+        if dnf mark unexclude "${packages_to_unexclude[@]}" &>>"$LOG_DIR/pkg_unexclude.log"; then
+            log_success "Packages unexcluded using dnf."
+        else
+            log_warn "Failed to unexclude packages using dnf. Check $LOG_DIR/pkg_unexclude.log"
+        fi
+    elif command -v yum >/dev/null; then
+        log_info "Using yum to unexclude (removing from exclude line in yum.conf): ${packages_to_unexclude[*]}"
+        local yum_conf="/etc/yum.conf"
+        if [[ ! -f "$yum_conf" ]]; then # RHEL/CentOS 8+ might use dnf.conf
+             yum_conf="/etc/dnf/dnf.conf"
+        fi
+
+        if [[ -f "$yum_conf" ]]; then
+            for pkg in "${packages_to_unexclude[@]}"; do
+                sed -i "s/\b$pkg\b//g" "$yum_conf" # remove package name
+            done
+            sed -i "s/exclude=\s*$/exclude=/" "$yum_conf" # clean up if exclude is empty
+            sed -i "s/exclude=\s\+/exclude= /g" "$yum_conf" # clean up multiple spaces
+            log_success "Packages removed from yum exclude list in $yum_conf."
+        else
+            log_warn "Could not find $yum_conf to unexclude packages."
+        fi
+    elif command -v apt-mark >/dev/null; then
+        log_info "Using apt-mark to unhold: ${packages_to_unexclude[*]}"
+        if apt-mark unhold "${packages_to_unexclude[@]}" &>>"$LOG_DIR/pkg_unexclude.log"; then
+            log_success "Packages unheld using apt-mark."
+        else
+            log_warn "Failed to unhold packages using apt-mark. Check $LOG_DIR/pkg_unexclude.log"
+        fi
+    else
+        log_warn "No supported package manager found to unexclude system packages."
+    fi
 }
 
 # Link all binaries
@@ -612,6 +725,19 @@ show_summary() {
     echo -e "• Windows 11 compatible"
     echo -e "• testssl.sh A+ ready"
     echo
+    echo -e "${YELLOW}Package Manager Note:${NC}"
+    echo -e "• System openssl, openssh-server, and openssh-clients packages have been"
+    echo -e "  excluded/held to prevent accidental overwrite by system updates."
+    echo -e "• To revert this (e.g., before running '$0 remove'):"
+
+    if command -v dnf >/dev/null; then
+        echo -e "  ${CYAN}sudo dnf mark unexclude openssl openssh-server openssh-clients${NC}"
+    elif command -v yum >/dev/null; then
+        echo -e "  ${CYAN}Edit /etc/yum.conf or /etc/dnf/dnf.conf and remove them from the 'exclude' line.${NC}"
+    elif command -v apt-mark >/dev/null; then
+        echo -e "  ${CYAN}sudo apt-mark unhold openssl openssh-server openssh-clients${NC}"
+    fi
+    echo
 }
 
 # Reboot preparation
@@ -679,6 +805,7 @@ install() {
     build_openssh || exit 1
     link_all_binaries || exit 1
     create_ssh_config || exit 1
+    exclude_system_packages # Call the new function here
     test_installation || log_warn "Some tests failed"
     
     # Cleanup
@@ -692,22 +819,33 @@ install() {
 main() {
     check_root
     
+    # Ensure SCRIPT_DEBUG is set, default to 0 if not
+    SCRIPT_DEBUG="${SCRIPT_DEBUG:-0}"
+
     case "${1:-}" in
         install|reinstall)
             install
             ;;
         remove|uninstall)
             print_header
-            log_warn "This will restore system packages"
+            log_warn "This will remove the custom installation, unexclude/unhold system packages,"
+            log_warn "and attempt to restore system default OpenSSL/OpenSSH packages."
             read -r -p "Continue? [y/N] " answer
             [[ "${answer,,}" == "y" ]] && {
+                unexclude_system_packages # Call before reinstalling system packages
+                log_info "Removing custom installation directories..."
                 rm -rf "${OPENSSL_INSTALL_PREFIX}"
                 rm -rf "${OPENSSH_INSTALL_PREFIX}"
+                log_info "Removing symlinks..."
                 rm -f /usr/bin/ssh* /usr/sbin/sshd /usr/bin/scp /usr/bin/sftp /usr/bin/openssl
                 rm -f /etc/ld.so.conf.d/openssl-*.conf
+                log_info "Updating library cache..."
                 ldconfig
+                log_info "Attempting to reinstall system OpenSSL and OpenSSH packages..."
                 pkg_manager install openssl openssh-server openssh-clients
-                log_success "Removed custom installation"
+                log_success "Custom installation removed and system packages (attempted) restore."
+                log_info "It's recommended to verify your SSH/SSL versions and functionality."
+                log_warn "A system reboot might be necessary for all changes to take full effect."
             }
             ;;
         verify|check)
