@@ -10,7 +10,8 @@ set -euo pipefail
 # Version configuration
 readonly OPENSSL_VERSION="${OPENSSL_VERSION:-3.5.0}"
 readonly OPENSSH_VERSION="${OPENSSH_VERSION:-10.0p2}"
-readonly BUILD_DIR="/tmp/build-ssh-ssl-$$"
+BUILD_DIR=$(mktemp -d)
+trap 'rm -rf "$BUILD_DIR"' EXIT
 readonly OPENSSL_PREFIX="/usr/local/openssl-${OPENSSL_VERSION}"
 readonly OPENSSH_PREFIX="/usr/local/openssh-${OPENSSH_VERSION}"
 readonly BACKUP_DIR="/root/ssh-ssl-backup-$(date +%Y%m%d-%H%M%S)"
@@ -22,8 +23,6 @@ readonly YELLOW='\033[1;33m'
 readonly BLUE='\033[0;34m'
 readonly NC='\033[0m'
 
-# Cleanup on exit
-trap 'rm -rf "$BUILD_DIR"' EXIT
 
 # Print colored messages
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -72,7 +71,7 @@ install_dependencies() {
                    libselinux1-dev libedit-dev
     else
         # Fedora/RHEL packages
-        pkg_install gcc make wget tar perl zlib-devel pam-devel
+        pkg_install gcc make wget tar perl zlib-devel pam-devel libselinux-devel libedit-devel
     fi
     
     success "Dependencies installed"
@@ -126,8 +125,8 @@ build_openssl() {
     ./config \
         --prefix="$OPENSSL_PREFIX" \
         --openssldir="$OPENSSL_PREFIX" \
-        shared \
-        enable-ec_nistp_64_gcc_128 \
+        --libdir="$OPENSSL_PREFIX/lib" \
+        shared enable-ec_nistp_64_gcc_128 \
         -Wl,-rpath,"$OPENSSL_PREFIX/lib" \
         || die "OpenSSL configure failed"
     
@@ -148,6 +147,11 @@ build_openssh() {
     
     cd "$ssh_dir" || die "Cannot enter OpenSSH directory: $ssh_dir"
     
+    # Set environment to use our custom OpenSSL
+    export PKG_CONFIG_PATH="$OPENSSL_PREFIX/lib/pkgconfig:$OPENSSL_PREFIX/lib64/pkgconfig"
+    export LDFLAGS="-L$OPENSSL_PREFIX/lib -L$OPENSSL_PREFIX/lib64 -Wl,-rpath,$OPENSSL_PREFIX/lib -Wl,-rpath,$OPENSSL_PREFIX/lib64"
+    export CPPFLAGS="-I$OPENSSL_PREFIX/include"
+    
     # Configure with PAM support and custom OpenSSL
     ./configure \
         --prefix="$OPENSSH_PREFIX" \
@@ -155,39 +159,45 @@ build_openssh() {
         --with-ssl-dir="$OPENSSL_PREFIX" \
         --with-pam \
         --with-privsep-path=/var/lib/sshd \
+        --without-openssl-header-check \
         || die "OpenSSH configure failed"
     
     # Build and install
     make -j"$(nproc)" || die "OpenSSH build failed"
     make install || die "OpenSSH install failed"
     
-    # Create privilege separation directory
+    # Create privilege separation directory and user
     mkdir -p /var/lib/sshd
     chmod 700 /var/lib/sshd
+    
+    # Create sshd user if missing (required for privilege separation)
+    if ! id -u sshd &>/dev/null; then
+        info "Creating sshd user for privilege separation..."
+        if command -v useradd &>/dev/null; then
+            useradd -r -U -d /var/lib/sshd -s /sbin/nologin -c "Privilege-separated SSH" sshd
+        else
+            adduser --system --group --home /var/lib/sshd --shell /sbin/nologin --comment "Privilege-separated SSH" sshd
+        fi
+    fi
     
     success "OpenSSH installed to $OPENSSH_PREFIX"
 }
 
 # Create symlinks for system binaries
 create_symlinks() {
-    info "Creating system symlinks..."
-    
-    # OpenSSL binary
-    ln -sf "$OPENSSL_PREFIX/bin/openssl" /usr/bin/openssl
-    
-    # OpenSSH binaries
+    info "Setting up alternatives for OpenSSL/OpenSSH..."
+    # OpenSSL
+    update-alternatives --install /usr/bin/openssl openssl "$OPENSSL_PREFIX/bin/openssl" 200
+    update-alternatives --set openssl "$OPENSSL_PREFIX/bin/openssl"
+
+    # OpenSSH-tools
     for bin in ssh scp sftp ssh-add ssh-agent ssh-keygen ssh-keyscan; do
-        ln -sf "$OPENSSH_PREFIX/bin/$bin" "/usr/bin/$bin"
+        update-alternatives --install /usr/bin/$bin $bin "$OPENSSH_PREFIX/bin/$bin" 200
+        update-alternatives --set $bin "$OPENSSH_PREFIX/bin/$bin"
     done
-    
-    # SSH daemon
-    ln -sf "$OPENSSH_PREFIX/sbin/sshd" /usr/sbin/sshd
-    
-    # Update library cache
-    echo "$OPENSSL_PREFIX/lib" > "/etc/ld.so.conf.d/openssl-${OPENSSL_VERSION}.conf"
+
     ldconfig
-    
-    success "Symlinks created"
+    success "Alternatives configured"
 }
 
 # Configure secure SSH settings
@@ -292,31 +302,34 @@ exclude_packages() {
 test_installation() {
     info "Testing installation..."
     local failed=0
-    
-    # Test OpenSSL
-    if "$OPENSSL_PREFIX/bin/openssl" version &>/dev/null; then
-        success "OpenSSL test passed"
-    else
-        error "OpenSSL test failed"
+
+    # OpenSSL
+    if ! "$OPENSSL_PREFIX/bin/openssl" version >/dev/null 2>&1; then
+        error "OpenSSL test failed:"
+        "$OPENSSL_PREFIX/bin/openssl" version || true
+        ldd "$OPENSSL_PREFIX/bin/openssl" | grep "not found" || true
         ((failed++))
-    fi
-    
-    # Test SSH
-    if ssh -V &>/dev/null; then
-        success "SSH client test passed"
     else
+        success "OpenSSL OK: $("$OPENSSL_PREFIX/bin/openssl" version | awk '{print $2}')"
+    fi
+
+    # SSH-client
+    if ! "$OPENSSH_PREFIX/bin/ssh" -V >/dev/null 2>&1; then
         error "SSH client test failed"
         ((failed++))
-    fi
-    
-    # Test SSH daemon config
-    if /usr/sbin/sshd -t &>/dev/null; then
-        success "SSH daemon config test passed"
     else
-        error "SSH daemon config test failed"
-        ((failed++))
+        success "SSH client OK: $("$OPENSSH_PREFIX/bin/ssh" -V 2>&1)"
     fi
-    
+
+    # SSH-daemon config
+    if ! "$OPENSSH_PREFIX/sbin/sshd" -t -f /etc/ssh/sshd_config >/dev/null 2>&1; then
+        error "SSH daemon config test failed"
+        "$OPENSSH_PREFIX/sbin/sshd" -t -f /etc/ssh/sshd_config || true
+        ((failed++))
+    else
+        success "SSH daemon config OK"
+    fi
+
     return $failed
 }
 
@@ -367,10 +380,10 @@ install() {
     info "OpenSSH: $OPENSSH_PREFIX"
     info "Backups: $BACKUP_DIR"
     echo
-    warn "System will reboot in 30 seconds..."
+    warn "System will restart in a few seconds to apply changes."
     
     # Schedule reboot
-    shutdown -r +1 "OpenSSL/OpenSSH installation complete" &>/dev/null || warn "Please reboot manually"
+    shutdown -r +1 "OpenSSL/OpenSSH installation complete - system restarting" &>/dev/null || warn "Automatic restart failed - please reboot manually"
 }
 
 # Remove custom installation
