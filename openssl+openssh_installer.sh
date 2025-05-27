@@ -380,7 +380,7 @@ install() {
     info "OpenSSH: $OPENSSH_PREFIX"
     info "Backups: $BACKUP_DIR"
     echo
-    warn "System will restart in a few seconds to apply changes."
+    warn "System will restart in a minute to apply changes."
     
     # Schedule reboot
     shutdown -r +1 "OpenSSL/OpenSSH installation complete - system restarting" &>/dev/null || warn "Automatic restart failed - please reboot manually"
